@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voxelweave:release-evidence:v1",
+  "title": "VoxelWeave release evidence",
+  "description": "Machine-readable evidence for an Apple Silicon VoxelWeave Designer release.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "release",
+    "target",
+    "artifacts",
+    "checksums",
+    "verification",
+    "signing"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "voxelweave.release-evidence.v1"
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "gitSha", "channel", "generatedAt", "workflow"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "gitSha": {"type": "string", "pattern": "^[0-9a-fA-F]{7,64}$"},
+        "channel": {"enum": ["stable", "development-prerelease"]},
+        "generatedAt": {"type": "string", "format": "date-time"},
+        "workflow": {"type": "string", "minLength": 1}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "minimumOS", "runner", "architecture", "rustTarget"],
+      "properties": {
+        "platform": {"const": "macOS"},
+        "minimumOS": {"const": "14"},
+        "runner": {"const": "macos-14"},
+        "architecture": {"const": "arm64"},
+        "rustTarget": {"const": "aarch64-apple-darwin"}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "path", "kind", "sizeBytes", "sha256", "architecture"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "pattern": "^(?!/)(?!.*\\.\\.).+"},
+          "kind": {"enum": ["app-zip", "dmg"]},
+          "sizeBytes": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "architecture": {"enum": ["arm64", "not_applicable"]}
+        }
+      }
+    },
+    "checksums": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "file"],
+      "properties": {
+        "algorithm": {"const": "SHA-256"},
+        "file": {"const": "SHA256SUMS"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "checksums", "packaging"],
+      "properties": {
+        "architecture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "targetArchitecture", "rustTarget", "scope"],
+          "properties": {
+            "status": {"const": "passed"},
+            "targetArchitecture": {"const": "arm64"},
+            "rustTarget": {"const": "aarch64-apple-darwin"},
+            "scope": {"type": "string", "minLength": 1},
+            "report": {"type": "string", "minLength": 1},
+            "reportSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "checksums": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "algorithm"],
+          "properties": {
+            "status": {"const": "passed"},
+            "algorithm": {"const": "SHA-256"}
+          }
+        },
+        "packaging": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "appAndDmgBuilt"],
+          "properties": {
+            "status": {"const": "passed"},
+            "appAndDmgBuilt": {"const": true}
+          }
+        }
+      }
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "signed", "notarized", "notarizationStatus"],
+      "properties": {
+        "status": {
+          "enum": ["signed-and-notarized", "development-prerelease-not-notarized"]
+        },
+        "signed": {"type": "boolean"},
+        "notarized": {"type": "boolean"},
+        "notarizationStatus": {"enum": ["accepted", "not-performed"]}
+      }
+    }
+  }
+}

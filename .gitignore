@@ -1,0 +1,42 @@
+# JavaScript / TypeScript
+node_modules/
+.pnpm-store/
+dist/
+build/
+out/
+.turbo/
+.vite/
+playwright-report/
+test-results/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Rust / Tauri
+target/
+*.rs.bk
+
+# Local configuration and release output
+.env
+.env.*
+!.env.example
+.railway/
+.release/
+release-output/
+coverage/
+
+# Local scientific inputs and generated evidence. Keep PHI and raw scans out of Git.
+data/
+fixtures/local/
+*.dcm
+*.dicom
+*.voxelweave
+
+# macOS
+.DS_Store

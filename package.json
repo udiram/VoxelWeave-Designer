@@ -1,0 +1,31 @@
+{
+  "name": "voxelweave-designer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repository orchestration and release tooling for VoxelWeave Designer.",
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "setup": "scripts/install-workspaces.sh",
+    "dev": "scripts/dev-workspace.sh apps/desktop apps/site services/release-api",
+    "dev:desktop": "scripts/dev-workspace.sh apps/desktop",
+    "dev:site": "scripts/dev-workspace.sh apps/site",
+    "lint": "scripts/run-workspace-suite.sh --label lint --scripts lint --paths apps/desktop apps/site services/release-api",
+    "typecheck": "scripts/run-workspace-suite.sh --label typecheck --scripts typecheck --paths apps/desktop apps/site services/release-api",
+    "test": "scripts/run-workspace-suite.sh --label test --scripts test --paths apps/desktop apps/site services/release-api",
+    "build": "scripts/run-workspace-suite.sh --label build --scripts build --paths apps/desktop apps/site services/release-api",
+    "test:e2e": "scripts/run-workspace-suite.sh --label Playwright --playwright --paths apps/desktop apps/site services/release-api",
+    "check:contracts": "scripts/check-python-contracts.sh",
+    "check:desktop": "scripts/run-workspace-suite.sh --label desktop --scripts lint typecheck test build --playwright --paths apps/desktop",
+    "check:site-service": "scripts/run-workspace-suite.sh --label site-service --scripts lint typecheck test build --playwright --paths apps/site services/release-api",
+    "check:architecture": "scripts/run-architecture-check.sh",
+    "check:release-evidence": "scripts/check-release-evidence.sh",
+    "check:links": "python3 scripts/check-local-links.py",
+    "check:workflows": "python3 scripts/check-workflow-yaml.py",
+    "check": "scripts/run-all-checks.sh",
+    "test:release-evidence": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+    "release:build": "scripts/build-tauri-release.sh",
+    "release:verify": "scripts/verify-release-evidence.sh",
+    "railway:bundle": "scripts/build-railway-bundle.sh",
+    "railway:deploy": "scripts/deploy-railway.sh"
+  }
+}
