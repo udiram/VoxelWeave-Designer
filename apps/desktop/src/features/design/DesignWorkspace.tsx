@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { unzipSync } from "fflate";
@@ -7,18 +7,21 @@ import { Button, Disclosure, FieldRow, IconButton, NumberField, SelectField, Sec
 import { Icon } from "../../components/icons";
 import { DesignViewport } from "../../components/visuals";
 import { AppStatusBar, RailHeader } from "../shell/Shell";
-import type { SceneObject } from "../../types";
+import type { SceneObject, SceneTransformMode, Vec3 } from "../../types";
 import { authorizeNativePath, isNativeRuntime } from "../../services/projectDocument";
 
 const axes = ["x", "y", "z"] as const;
 
-type SolidMesh = { vertices: number[][]; faces: number[][]; dimensionsMm: { x: number; y: number; z: number } };
+type SolidMesh = { vertices: number[][]; faces: number[][]; dimensionsMm: Vec3; centerMm: Vec3 };
 
-function meshDimensions(vertices: number[][]) {
+function meshBounds(vertices: number[][]) {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   vertices.forEach((vertex) => vertex.forEach((value, axis) => { min[axis] = Math.min(min[axis], value); max[axis] = Math.max(max[axis], value); }));
-  return { x: Math.max(0.001, max[0] - min[0]), y: Math.max(0.001, max[1] - min[1]), z: Math.max(0.001, max[2] - min[2]) };
+  return {
+    dimensionsMm: { x: Math.max(0.001, max[0] - min[0]), y: Math.max(0.001, max[1] - min[1]), z: Math.max(0.001, max[2] - min[2]) },
+    centerMm: { x: (min[0] + max[0]) / 2, y: (min[1] + max[1]) / 2, z: (min[2] + max[2]) / 2 },
+  };
 }
 
 function parseStl(bytes: Uint8Array): SolidMesh {
@@ -41,7 +44,7 @@ function parseStl(bytes: Uint8Array): SolidMesh {
     for (let index = 0; index + 2 < matches.length; index += 3) faces.push([0, 1, 2].map((vertex) => add(matches[index + vertex].slice(1, 4).map(Number))));
   }
   if (!vertices.length || !faces.length) throw new Error("STL did not contain a triangular mesh");
-  return { vertices, faces, dimensionsMm: meshDimensions(vertices) };
+  return { vertices, faces, ...meshBounds(vertices) };
 }
 
 const identity3mfTransform = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
@@ -101,7 +104,7 @@ export function parse3mf(bytes: Uint8Array): SolidMesh {
   if (buildItems.length) buildItems.forEach((item) => appendObject(item.getAttribute("objectid") ?? "", [parse3mfTransform(item.getAttribute("transform"))]));
   else objects.forEach((_object, id) => appendObject(id, [identity3mfTransform]));
   if (!vertices.length || !faces.length || vertices.some((vertex) => vertex.some((value) => !Number.isFinite(value)))) throw new Error("3MF model did not contain finite vertices and triangles");
-  return { vertices, faces, dimensionsMm: meshDimensions(vertices) };
+  return { vertices, faces, ...meshBounds(vertices) };
 }
 
 export async function readSolid(path: string, format: "stl" | "3mf"): Promise<SolidMesh> {
@@ -111,11 +114,16 @@ export async function readSolid(path: string, format: "stl" | "3mf"): Promise<So
 }
 
 export function DesignWorkspace() {
-  const { state, dispatch, sidecar } = useProject();
+  const { state, dispatch, sidecar, undoSceneEdit, redoSceneEdit, canUndoSceneEdit, canRedoSceneEdit } = useProject();
   const [transformOpen, setTransformOpen] = useState(true);
   const [ownershipOpen, setOwnershipOpen] = useState(true);
   const [booleanOpen, setBooleanOpen] = useState(true);
-  const selected = useMemo(() => state.scene.find((object) => object.id === state.ui.selectedSceneId) ?? state.scene[0], [state.scene, state.ui.selectedSceneId]);
+  const [transformMode, setTransformMode] = useState<SceneTransformMode>("translate");
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [gridVisible, setGridVisible] = useState(true);
+  const [fitVersion, setFitVersion] = useState(0);
+  const [fitTargetId, setFitTargetId] = useState<string>();
+  const selected = useMemo(() => state.scene.find((object) => object.id === state.ui.selectedSceneId) ?? state.scene.find((object) => object.visible) ?? state.scene[0], [state.scene, state.ui.selectedSceneId]);
   const selectedCalibration = state.calibrations.find((profile) => profile.accepted && profile.tool === selected?.tool);
   const selectedTargetHu = selected?.targetHu ?? selectedCalibration?.huSamples[Math.floor((selectedCalibration?.huSamples.length ?? 1) / 2)]?.targetHu ?? 0;
   const hydrationAttempts = useRef(new Set<string>());
@@ -130,6 +138,45 @@ export function DesignWorkspace() {
       .catch((error) => dispatch({ type: "SET_TOAST", message: error instanceof Error ? `Mesh preview unavailable: ${error.message}` : "Mesh preview unavailable" }));
   }, [dispatch, state.scene]);
   const choose = (id: string) => dispatch({ type: "SET_SCENE_SELECTION", id });
+  const transformLocked = selected?.kind === "dicom";
+  const setMode = (mode: SceneTransformMode) => {
+    setTransformMode(mode);
+    dispatch({ type: "SET_TOAST", message: mode === "translate" ? "Move tool · 0.5 mm snapping" : mode === "rotate" ? "Rotate tool · 15° snapping" : "Scale tool · 5% snapping" });
+  };
+  const fitView = (targetId?: string) => {
+    const target = targetId ? state.scene.find((object) => object.id === targetId && object.visible) : undefined;
+    setFitTargetId(target?.id);
+    setFitVersion((value) => value + 1);
+  };
+  const commitTransform = (id: string, transform: SceneObject["transform"]) => dispatch({ type: "SET_SCENE_TRANSFORM", id, transform });
+  const nudgeSelection = (axis: keyof Vec3, amount: number) => {
+    if (!selected || selected.kind === "dicom") return;
+    dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { position: { ...selected.transform.position, [axis]: Number((selected.transform.position[axis] + amount).toFixed(3)) } } });
+  };
+  const handleViewportKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.metaKey || event.ctrlKey) return;
+    const key = event.key.toLowerCase();
+    if (key === "w" || key === "m") { event.preventDefault(); setMode("translate"); return; }
+    if (key === "e") { event.preventDefault(); setMode("rotate"); return; }
+    if (key === "r" || key === "s") { event.preventDefault(); setMode("scale"); return; }
+    if (key === "f") { event.preventDefault(); fitView(event.shiftKey ? undefined : selected?.id); return; }
+    if (key === "g") { event.preventDefault(); setGridVisible((value) => !value); return; }
+    const amount = event.shiftKey ? 5 : 0.5;
+    const command = event.key === "ArrowLeft" ? ["x", -amount] : event.key === "ArrowRight" ? ["x", amount] : event.key === "ArrowDown" ? ["y", -amount] : event.key === "ArrowUp" ? ["y", amount] : event.key === "PageDown" ? ["z", -amount] : event.key === "PageUp" ? ["z", amount] : undefined;
+    if (command) { event.preventDefault(); nudgeSelection(command[0] as keyof Vec3, command[1] as number); }
+  };
+  const toggleVisibility = (object: SceneObject) => {
+    if (object.visible && object.id === selected?.id) {
+      const replacement = state.scene.find((candidate) => candidate.id !== object.id && candidate.visible);
+      if (replacement) choose(replacement.id);
+    }
+    dispatch({ type: "TOGGLE_SCENE_VISIBILITY", id: object.id });
+  };
+  const handleSceneRowKey = (event: ReactKeyboardEvent<HTMLDivElement>, index: number, id: string) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); choose(id); return; }
+    const nextIndex = event.key === "ArrowDown" ? Math.min(state.scene.length - 1, index + 1) : event.key === "ArrowUp" ? Math.max(0, index - 1) : -1;
+    if (nextIndex >= 0) { event.preventDefault(); choose(state.scene[nextIndex].id); (event.currentTarget.parentElement?.children[nextIndex] as HTMLElement | undefined)?.focus(); }
+  };
   const importSolid = async () => {
     if (!isNativeRuntime()) { dispatch({ type: "SET_TOAST", message: "The browser adapter records import intent only" }); return; }
     try {
@@ -139,7 +186,8 @@ export function DesignWorkspace() {
       const format = selectedPath.toLowerCase().endsWith(".3mf") ? "3mf" : "stl";
       const mesh = await readSolid(selectedPath, format);
       dispatch({ type: "SET_IMPORTED_SOLID", path: selectedPath, format, ...mesh });
-      const validation = await sidecar.validateScene({ ...state, scene: [...state.scene, { id: "import-pending", name: "Imported solid", kind: "fixture", region: "fixture", tool: "T1", sourcePath: selectedPath, dimensionsMm: mesh.dimensionsMm, vertices: mesh.vertices, faces: mesh.faces, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: mesh.dimensionsMm }, visible: true }] });
+      const centeredVertices = mesh.vertices.map((vertex) => [vertex[0] - mesh.centerMm.x, vertex[1] - mesh.centerMm.y, vertex[2] - mesh.centerMm.z]);
+      const validation = await sidecar.validateScene({ ...state, scene: [...state.scene, { id: "import-pending", name: "Imported solid", kind: "fixture", region: "fixture", tool: "T1", sourcePath: selectedPath, sourceCenterMm: mesh.centerMm, sourceDimensionsMm: mesh.dimensionsMm, dimensionsMm: mesh.dimensionsMm, vertices: centeredVertices, faces: mesh.faces, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: mesh.dimensionsMm }, visible: true }] });
       dispatch({ type: "SET_TOAST", message: validation.valid ? `Validated ${format.toUpperCase()} import` : validation.messages.join(" · ") });
     } catch (error) { dispatch({ type: "SET_TOAST", message: error instanceof Error ? error.message : "Solid import failed" }); }
   };
@@ -150,8 +198,8 @@ export function DesignWorkspace() {
       <RailHeader title="Scene" action="plus" actionLabel="Add primitive" onAction={() => dispatch({ type: "ADD_PRIMITIVE", kind: "box" })} />
       <div className="rail-subline"><span>{state.scene.length} objects · {state.source.path ? "1 DICOM source" : "no DICOM source"}</span><IconButton label="Scene options" icon="more" size={16} onClick={() => dispatch({ type: "SET_TOAST", message: "Scene options: validate ownership or inspect provenance" })} /></div>
       <div className="scene-tree" role="tree" aria-label="Scene objects">
-        {state.scene.map((object) => <div key={object.id} className={`scene-row ${selected?.id === object.id ? "selected" : ""}`} role="treeitem" aria-selected={selected?.id === object.id} onClick={() => choose(object.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") choose(object.id); }}>
-          <Icon name={object.kind === "dicom" ? "dicom" : "cube"} size={16} /><span>{object.name}</span><button type="button" className="row-eye" aria-label={`${object.visible ? "Hide" : "Show"} ${object.name}`} onClick={(event) => { event.stopPropagation(); dispatch({ type: "TOGGLE_SCENE_VISIBILITY", id: object.id }); }}><Icon name={object.visible ? "eye" : "eyeOff"} size={15} /></button>
+        {state.scene.map((object, index) => <div key={object.id} className={`scene-row ${selected?.id === object.id ? "selected" : ""}`} role="treeitem" aria-selected={selected?.id === object.id} onClick={() => choose(object.id)} tabIndex={selected?.id === object.id ? 0 : -1} data-testid={`scene-row-${object.id}`} onKeyDown={(event) => handleSceneRowKey(event, index, object.id)}>
+          <Icon name={object.kind === "dicom" ? "dicom" : "cube"} size={16} /><span>{object.name}</span><button type="button" className="row-eye" aria-label={`${object.visible ? "Hide" : "Show"} ${object.name}`} onClick={(event) => { event.stopPropagation(); toggleVisibility(object); }}><Icon name={object.visible ? "eye" : "eyeOff"} size={15} /></button>
         </div>)}
       </div>
       <div className="rail-divider" />
@@ -161,15 +209,15 @@ export function DesignWorkspace() {
     </aside>
 
     <section className="workspace-center design-center" aria-labelledby="design-heading">
-      <div className="center-toolbar"><div><span className="workspace-kicker">PARAMETRIC GEOMETRY + SOURCE</span><h1 id="design-heading">Design</h1></div><div className="tool-group" aria-label="Transform tools"><IconButton label="Move selection" icon="move" onClick={() => dispatch({ type: "SET_TOAST", message: "Move tool active · snap increment 0.5 mm" })} /><IconButton label="Rotate selection" icon="rotate" onClick={() => dispatch({ type: "SET_TOAST", message: "Rotate tool active · exact angle entry is available in the inspector" })} /><IconButton label="Scale selection" icon="scale" onClick={() => dispatch({ type: "SET_TOAST", message: "Scale tool active · dimensions remain in millimetres" })} /><span className="toolbar-separator" /><IconButton label="Align selection" icon="target" onClick={() => dispatch({ type: "SET_TOAST", message: "Alignment uses scene physical coordinates" })} /><IconButton label="Toggle grid" icon="grid" onClick={() => dispatch({ type: "SET_TOAST", message: "Grid visibility toggled" })} /></div></div>
-      <div className="canvas-toolbar"><Button variant="secondary" icon="plus" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "box" })}>Box</Button><Button variant="secondary" icon="cube" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "cylinder" })}>Cylinder</Button><Button variant="secondary" icon="design" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "wedge" })}>Wedge</Button><Button variant="secondary" icon="design" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "polygon-prism" })}>Polygon prism</Button><Button variant="secondary" icon="design" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "extrusion" })}>Extrusion</Button><span className="toolbar-separator" /><Button variant="quiet" icon="union" onClick={() => boolean("union")}>Union</Button><Button variant="quiet" icon="subtract" onClick={() => boolean("subtract")}>Subtract</Button><Button variant="quiet" icon="intersect" onClick={() => boolean("intersect")}>Intersect</Button><span className="toolbar-spacer" /><Button variant="quiet" icon="upload" onClick={() => void importSolid()}>Import STL / 3MF</Button></div>
-      <DesignViewport selectedId={selected?.id ?? ""} onSelect={choose} scene={state.scene} />
-      <div className="canvas-caption"><span><Icon name="info" size={14} />Interactive scene preview · canonical validation remains a sidecar responsibility</span><span>Origin locked · mm</span></div>
+      <div className="center-toolbar"><div><span className="workspace-kicker">PARAMETRIC GEOMETRY + SOURCE</span><h1 id="design-heading">Design</h1></div><div className="tool-group" aria-label="Transform tools"><IconButton label="Move selection" icon="move" aria-pressed={transformMode === "translate"} disabled={transformLocked} onClick={() => setMode("translate")} /><IconButton label="Rotate selection" icon="rotate" aria-pressed={transformMode === "rotate"} disabled={transformLocked} onClick={() => setMode("rotate")} /><IconButton label="Scale selection" icon="scale" aria-pressed={transformMode === "scale"} disabled={transformLocked} onClick={() => setMode("scale")} /><IconButton label="Toggle transform snapping" icon="lock" aria-pressed={snapEnabled} disabled={transformLocked} onClick={() => setSnapEnabled((value) => !value)} /><span className="toolbar-separator" /><IconButton label="Undo scene edit" icon="stepBack" disabled={!canUndoSceneEdit} onClick={undoSceneEdit} /><IconButton label="Redo scene edit" icon="stepForward" disabled={!canRedoSceneEdit} onClick={redoSceneEdit} /><IconButton label="Center selection on XY origin" icon="target" disabled={transformLocked} onClick={() => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { position: { ...selected.transform.position, x: 0, y: 0 } } })} /><IconButton label="Focus selection in view" icon="fit" disabled={!selected} onClick={() => fitView(selected?.id)} /><IconButton label="Fit entire scene" icon="scan" onClick={() => fitView()} /><IconButton label="Toggle grid" icon="grid" aria-pressed={gridVisible} onClick={() => setGridVisible((value) => !value)} /></div></div>
+      <div className="canvas-toolbar"><div className="canvas-command-group"><Button variant="secondary" icon="plus" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "box" })}>Box</Button><Button variant="secondary" icon="cube" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "cylinder" })}>Cylinder</Button><Button variant="secondary" icon="design" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "wedge" })}>Wedge</Button><Button variant="secondary" icon="design" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "polygon-prism" })}>Polygon prism</Button><Button variant="secondary" icon="design" onClick={() => dispatch({ type: "ADD_PRIMITIVE", kind: "extrusion" })}>Extrusion</Button></div><div className="canvas-command-group boolean-command-group"><Button variant="quiet" icon="union" onClick={() => boolean("union")}>Union</Button><Button variant="quiet" icon="subtract" onClick={() => boolean("subtract")}>Subtract</Button><Button variant="quiet" icon="intersect" onClick={() => boolean("intersect")}>Intersect</Button></div><span className="toolbar-spacer" /><Button variant="quiet" icon="upload" onClick={() => void importSolid()}>Import STL / 3MF</Button></div>
+      <DesignViewport selectedId={selected?.id ?? ""} mode={transformMode} snapEnabled={snapEnabled} gridVisible={gridVisible} fitVersion={fitVersion} fitTargetId={fitTargetId} onSelect={choose} onTransformCommit={commitTransform} onKeyboardCommand={handleViewportKey} scene={state.scene} />
+      <div className="canvas-caption"><span><Icon name="info" size={14} />Interactive preview · canonical validation remains a sidecar responsibility</span><span>{snapEnabled ? "Snap on" : "Free transform"} · physical mm</span></div>
     </section>
 
     <aside className="right-inspector" aria-label="Design inspector">
       <div className="inspector-title"><div><span className="workspace-kicker">ACTIVE SELECTION</span><h2>{selected?.name ?? "No selection"}</h2></div><IconButton label="Inspector options" icon="more" size={17} onClick={() => dispatch({ type: "SET_TOAST", message: "Inspector options are local to the active selection" })} /></div>
-      <Disclosure title="Transform" open={transformOpen} onToggle={() => setTransformOpen((open) => !open)}><div className="inspector-fields"><TransformRow label="Position" value={selected?.transform.position} onChange={(position) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { position } })} /><TransformRow label="Rotation" value={selected?.transform.rotation} onChange={(rotation) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { rotation } })} /><TransformRow label="Scale" value={selected?.transform.scale} onChange={(scale) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { scale } })} /><TransformRow label="Dimensions" value={selected?.dimensionsMm ?? selected?.transform.scale} onChange={(dimensionsMm) => selected && dispatch({ type: "SET_SCENE_DIMENSIONS", id: selected.id, dimensionsMm })} /></div></Disclosure>
+      <Disclosure title="Transform" open={transformOpen} onToggle={() => setTransformOpen((open) => !open)}>{selected?.kind === "dicom" ? <div className="locked-transform-note"><Icon name="lock" size={16} /><div><strong>Source geometry locked</strong><span>DICOM position, orientation, and physical size come from patient coordinates.</span><code>{formatVector(selected.dimensionsMm ?? selected.transform.scale)} mm</code></div></div> : <div className="inspector-fields"><TransformRow label="Position" unit="mm" step={0.5} value={selected?.transform.position} onChange={(position) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { position } })} /><TransformRow label="Rotation" unit="°" step={1} value={selected?.transform.rotation} onChange={(rotation) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { rotation } })} /><TransformRow label="Size" unit="mm" step={0.5} min={0.001} value={selected?.transform.scale} onChange={(scale) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { scale } })} />{selected?.sourceDimensionsMm && <div className="source-size-readout"><span>Source mesh</span><code>{formatVector(selected.sourceDimensionsMm)} mm</code></div>}</div>}</Disclosure>
       <Disclosure title="Region and tool" open={ownershipOpen} onToggle={() => setOwnershipOpen((open) => !open)}><SelectField label="Region" value={selected?.region ?? "measurement"} onChange={(event) => selected && dispatch({ type: "SET_SCENE_OWNERSHIP", id: selected.id, region: event.target.value as SceneObject["region"] })}><option value="measurement">Measurement</option><option value="support">Support</option><option value="fixture">Fixture</option></SelectField><SelectField label="Tool" value={selected?.tool ?? "T0"} onChange={(event) => selected && dispatch({ type: "SET_SCENE_OWNERSHIP", id: selected.id, tool: event.target.value as SceneObject["tool"] })}><option value="T0">T0 · Natural PLA</option><option value="T1">T1 · White PLA</option></SelectField>{selected && selected.kind !== "dicom" && <NumberField label="Target HU" value={selectedTargetHu} step={1} onChange={(targetHu) => dispatch({ type: "SET_SCENE_TARGET_HU", id: selected.id, targetHu })} />}</Disclosure>
       <Disclosure title="Boolean history" open={booleanOpen} onToggle={() => setBooleanOpen((open) => !open)}><div className="boolean-history">{state.scene.filter((object) => object.boolean).map((object, index) => <div key={object.id}><span className="history-index">{String(index + 1).padStart(2, "0")}</span><span>{object.name}</span><StatusBadge tone="neutral">{object.boolean?.operation}</StatusBadge></div>)}<p>Operands remain inspectable for canonical sidecar validation.</p></div></Disclosure>
       <div className="inspector-actions"><Button variant="primary" icon="check" onClick={async () => { const result = await sidecar.validateScene(state); dispatch({ type: "SET_TOAST", message: result.messages.join(" · ") || (result.valid ? "Scene validated" : "Scene validation failed") }); }}>Validate scene</Button><Button variant="quiet" icon="arrowUpRight" onClick={() => dispatch({ type: "SET_WORKSPACE", workspace: "dicom" })}>Continue to DICOM</Button></div>
@@ -178,6 +226,26 @@ export function DesignWorkspace() {
   </div>;
 }
 
-function TransformRow({ label, value, onChange }: { label: string; value?: SceneObject["transform"]["position"]; onChange: (value: SceneObject["transform"]["position"]) => void }) {
-  return <FieldRow label={label}><div className="triple-inputs">{axes.map((axis) => <label key={axis}><input aria-label={`${label} ${axis}`} type="number" value={value?.[axis] ?? 0} onChange={(event) => onChange({ ...(value ?? { x: 0, y: 0, z: 0 }), [axis]: Number(event.target.value) })} /><span>{axis.toUpperCase()}</span></label>)}</div></FieldRow>;
+function formatVector(value: Vec3): string {
+  return `${Number(value.x.toFixed(3))} × ${Number(value.y.toFixed(3))} × ${Number(value.z.toFixed(3))}`;
+}
+
+function TransformRow({ label, unit, value, step, min, onChange }: { label: string; unit: string; value?: Vec3; step: number; min?: number; onChange: (value: Vec3) => void }) {
+  const resolved = value ?? { x: 0, y: 0, z: 0 };
+  return <FieldRow label={label} hint={unit} className="transform-field-row"><div className="triple-inputs">{axes.map((axis) => <TransformAxisInput key={axis} label={`${label} ${axis}`} axis={axis} unit={unit} value={resolved[axis]} step={step} min={min} onCommit={(next) => onChange({ ...resolved, [axis]: next })} />)}</div></FieldRow>;
+}
+
+function TransformAxisInput({ label, axis, unit, value, step, min, onCommit }: { label: string; axis: typeof axes[number]; unit: string; value: number; step: number; min?: number; onCommit: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(Number(value.toFixed(4))));
+  const editing = useRef(false);
+  useEffect(() => { if (!editing.current) setDraft(String(Number(value.toFixed(4)))); }, [value]);
+  const commit = () => {
+    editing.current = false;
+    const parsed = Number(draft.trim());
+    if (!Number.isFinite(parsed) || (min !== undefined && parsed < min)) { setDraft(String(Number(value.toFixed(4)))); return; }
+    const normalized = Number(parsed.toFixed(4));
+    setDraft(String(normalized));
+    if (normalized !== value) onCommit(normalized);
+  };
+  return <label className="transform-axis"><span>{axis.toUpperCase()}</span><input aria-label={label} inputMode="decimal" type="text" value={draft} onFocus={(event) => { editing.current = true; event.currentTarget.select(); }} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); const parsed = Number(draft); setDraft(String(Number(((Number.isFinite(parsed) ? parsed : value) + (event.key === "ArrowUp" ? step : -step)).toFixed(4)))); } if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") { setDraft(String(Number(value.toFixed(4)))); event.currentTarget.blur(); } }} /><small>{unit}</small></label>;
 }

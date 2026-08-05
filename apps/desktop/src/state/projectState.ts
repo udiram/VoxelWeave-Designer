@@ -102,7 +102,7 @@ export function sourcePhysicalBounds(source: DicomSource): CropBounds {
 export function createInitialProjectState(recovered = false): ProjectState {
   const ui: ProjectUiState = {
     workspace: "design",
-    selectedSceneId: "scene-lung-volume",
+    selectedSceneId: "scene-reference-box",
     selectedPane: "axial",
     toast: recovered ? "Recovered the latest local project snapshot" : "Create or open a .voxelweave project to begin",
     autosaveState: recovered ? "recovered" : "saved",
@@ -136,6 +136,14 @@ function invalidateDerivedRun(state: ProjectState): Pick<ProjectState, "toolpath
   };
 }
 
+function validVector(value: Vec3, positive = false): boolean {
+  return [value.x, value.y, value.z].every((item) => Number.isFinite(item) && (!positive || item > 0));
+}
+
+function rejectedTransform(state: ProjectState, message: string): ProjectState {
+  return { ...state, ui: { ...state.ui, toast: message } };
+}
+
 export function projectReducer(state: ProjectState, action: ProjectAction): ProjectState {
   switch (action.type) {
     case "OPEN_SYNTHETIC_PROJECT":
@@ -167,7 +175,7 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         ui: {
           ...createInitialProjectState().ui,
           filePath: action.path,
-          selectedSceneId: action.project.scene[0]?.id ?? "",
+          selectedSceneId: action.project.scene.find((object) => object.kind !== "dicom" && object.visible)?.id ?? action.project.scene[0]?.id ?? "",
           toast: action.path ? `Opened ${action.path.split(/[\\/]/).pop()} · regenerate to restore runtime evidence` : "Opened project · regenerate to restore runtime evidence",
           autosaveState: "saved",
           lastSavedAt: action.project.savedAt,
@@ -197,6 +205,11 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const physicalBounds = sourcePhysicalBounds(source);
       const existingDicom = state.scene.find((object) => object.kind === "dicom" && object.sourcePath === source.path);
       const nonDicomScene = state.scene.filter((object) => object.kind !== "dicom");
+      const sourceCenter = {
+        x: (physicalBounds.x[0] + physicalBounds.x[1]) / 2,
+        y: (physicalBounds.y[0] + physicalBounds.y[1]) / 2,
+        z: (physicalBounds.z[0] + physicalBounds.z[1]) / 2,
+      };
       const scene = !source.path ? nonDicomScene : [...nonDicomScene, {
         ...existingDicom,
         id: "scene-dicom-source",
@@ -206,7 +219,7 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         tool: existingDicom?.tool ?? "T0" as const,
         sourcePath: source.path,
         dimensionsMm: { x: Math.max(0, source.dimensions.x - 1) * source.spacing.x, y: Math.max(0, source.dimensions.y - 1) * source.spacing.y, z: Math.max(0, source.dimensions.z - 1) * source.spacing.z },
-        transform: { position: source.origin, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+        transform: { position: sourceCenter, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
         visible: existingDicom?.visible ?? true,
       }];
       const selection = {
@@ -342,12 +355,16 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "SET_SCENE_SELECTION":
       return { ...state, ui: { ...state.ui, selectedSceneId: action.id } };
     case "SET_SCENE_TRANSFORM":
+      if (action.transform.position && !validVector(action.transform.position)) return rejectedTransform(state, "Position must contain three finite millimetre values");
+      if (action.transform.rotation && !validVector(action.transform.rotation)) return rejectedTransform(state, "Rotation must contain three finite degree values");
+      if (action.transform.scale && !validVector(action.transform.scale, true)) return rejectedTransform(state, "Object size must be greater than zero on every axis");
       return {
         ...state,
         ...invalidateDerivedRun(state),
         scene: state.scene.map((object) => object.id === action.id ? { ...object, transform: { ...object.transform, ...action.transform } } : object),
       };
     case "SET_SCENE_DIMENSIONS":
+      if (!validVector(action.dimensionsMm, true)) return rejectedTransform(state, "Geometry dimensions must be greater than zero on every axis");
       return {
         ...state,
         ...invalidateDerivedRun(state),
@@ -367,6 +384,13 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       };
     case "TOGGLE_SCENE_VISIBILITY":
       return { ...state, ...invalidateDerivedRun(state), scene: state.scene.map((object) => object.id === action.id ? { ...object, visible: !object.visible } : object) };
+    case "RESTORE_SCENE_SNAPSHOT":
+      return {
+        ...state,
+        ...invalidateDerivedRun(state),
+        scene: action.scene,
+        ui: { ...state.ui, selectedSceneId: action.selectedSceneId, toast: action.message },
+      };
     case "ADD_PRIMITIVE": {
       const number = state.scene.filter((object) => object.kind === action.kind).length + 1;
       const id = `scene-${action.kind}-${number}`;
@@ -420,10 +444,16 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "SET_IMPORTED_SOLID": {
       const number = state.scene.filter((object) => object.sourcePath).length + 1;
       const id = `scene-import-${number}`;
-      return { ...state, ...invalidateDerivedRun(state), scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, sourceDimensionsMm: action.dimensionsMm, vertices: action.vertices, faces: action.faces, dimensionsMm: action.dimensionsMm, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: action.dimensionsMm }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} mesh · ${action.vertices.length} vertices · validate before generation` } };
+      const centeredVertices = action.vertices.map((vertex) => [vertex[0] - action.centerMm.x, vertex[1] - action.centerMm.y, vertex[2] - action.centerMm.z]);
+      return { ...state, ...invalidateDerivedRun(state), scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, sourceDimensionsMm: action.dimensionsMm, sourceCenterMm: action.centerMm, vertices: centeredVertices, faces: action.faces, dimensionsMm: action.dimensionsMm, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: action.dimensionsMm }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} mesh · ${action.vertices.length} vertices · validate before generation` } };
     }
     case "HYDRATE_IMPORTED_SOLID":
-      return { ...state, scene: state.scene.map((object) => object.id === action.id ? { ...object, vertices: action.vertices, faces: action.faces, sourceDimensionsMm: action.dimensionsMm } : object) };
+      return { ...state, scene: state.scene.map((object) => {
+        if (object.id !== action.id) return object;
+        const sourceCenterMm = object.sourceCenterMm ?? action.centerMm;
+        const vertices = action.vertices.map((vertex) => [vertex[0] - sourceCenterMm.x, vertex[1] - sourceCenterMm.y, vertex[2] - sourceCenterMm.z]);
+        return { ...object, vertices, faces: action.faces, sourceDimensionsMm: action.dimensionsMm, sourceCenterMm };
+      }) };
     case "SET_TOAST":
       return { ...state, ui: { ...state.ui, toast: action.message } };
     case "CLEAR_TOAST":

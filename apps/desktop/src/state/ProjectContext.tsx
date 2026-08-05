@@ -13,9 +13,58 @@ interface ProjectContextValue {
   runOperation: <T>(operation: () => Promise<T>, successMessage?: string) => Promise<T>;
   openProjectFile: (path: string) => Promise<void>;
   saveProjectFile: (path?: string) => Promise<void>;
+  undoSceneEdit: () => void;
+  redoSceneEdit: () => void;
+  canUndoSceneEdit: boolean;
+  canRedoSceneEdit: boolean;
 }
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
+
+type SceneSnapshot = Pick<ProjectState, "scene"> & { selectedSceneId: string };
+type ProjectHistory = { present: ProjectState; past: SceneSnapshot[]; future: SceneSnapshot[] };
+type ProjectHistoryAction = { type: "project"; action: ProjectAction } | { type: "undo" } | { type: "redo" };
+
+const sceneHistoryActions = new Set<ProjectAction["type"]>([
+  "SET_SCENE_TRANSFORM",
+  "SET_SCENE_DIMENSIONS",
+  "SET_SCENE_OWNERSHIP",
+  "SET_SCENE_TARGET_HU",
+  "TOGGLE_SCENE_VISIBILITY",
+  "ADD_PRIMITIVE",
+  "BOOLEAN_SCENE",
+  "IMPORT_SOLID",
+  "SET_IMPORTED_SOLID",
+]);
+
+function sceneSnapshot(state: ProjectState): SceneSnapshot {
+  return { scene: state.scene, selectedSceneId: state.ui.selectedSceneId };
+}
+
+function projectHistoryReducer(history: ProjectHistory, action: ProjectHistoryAction): ProjectHistory {
+  if (action.type === "undo") {
+    const previous = history.past.at(-1);
+    if (!previous) return history;
+    return {
+      past: history.past.slice(0, -1),
+      present: projectReducer(history.present, { type: "RESTORE_SCENE_SNAPSHOT", ...previous, message: "Undid scene edit" }),
+      future: [sceneSnapshot(history.present), ...history.future].slice(0, 100),
+    };
+  }
+  if (action.type === "redo") {
+    const next = history.future[0];
+    if (!next) return history;
+    return {
+      past: [...history.past, sceneSnapshot(history.present)].slice(-100),
+      present: projectReducer(history.present, { type: "RESTORE_SCENE_SNAPSHOT", ...next, message: "Redid scene edit" }),
+      future: history.future.slice(1),
+    };
+  }
+  const present = projectReducer(history.present, action.action);
+  if (action.action.type === "OPEN_PROJECT" || action.action.type === "OPEN_SYNTHETIC_PROJECT") return { present, past: [], future: [] };
+  if (!sceneHistoryActions.has(action.action.type) || present.scene === history.present.scene) return { ...history, present };
+  return { present, past: [...history.past, sceneSnapshot(history.present)].slice(-100), future: [] };
+}
 
 function documentFromState(state: ProjectState): ProjectDocument {
   const { ui: _ui, ...document } = state;
@@ -26,21 +75,24 @@ export function ProjectProvider({ children }: PropsWithChildren) {
   const native = isNativeRuntime();
   const recovered = typeof window !== "undefined" ? recoverProject() : null;
   const initialState = recovered && !native ? { ...recovered, ui: createInitialProjectState(true).ui } : native ? { ...emptyProjectDocument, ui: { ...createInitialProjectState().ui, toast: "Create or open a .voxelweave project" } } : createInitialProjectState();
-  const [state, rawDispatch] = useReducer(projectReducer, initialState);
+  const [history, historyDispatch] = useReducer(projectHistoryReducer, { present: initialState, past: [], future: [] });
+  const state = history.present;
   const sidecar = useMemo(() => createSidecarClient(), []);
 
   const dispatch = useCallback((action: ProjectAction) => {
-    rawDispatch(action);
+    historyDispatch({ type: "project", action });
   }, []);
+  const undoSceneEdit = useCallback(() => historyDispatch({ type: "undo" }), []);
+  const redoSceneEdit = useCallback(() => historyDispatch({ type: "redo" }), []);
 
   useEffect(() => {
     if (native) return;
     const timeout = window.setTimeout(() => {
       try {
         saveProject(documentFromState(state));
-        rawDispatch({ type: "SET_TOAST", message: state.ui.toast });
+        historyDispatch({ type: "project", action: { type: "SET_TOAST", message: state.ui.toast } });
       } catch {
-        rawDispatch({ type: "SET_TOAST", message: "Autosave unavailable in this browser context" });
+        historyDispatch({ type: "project", action: { type: "SET_TOAST", message: "Autosave unavailable in this browser context" } });
       }
     }, 260);
     return () => window.clearTimeout(timeout);
@@ -48,7 +100,7 @@ export function ProjectProvider({ children }: PropsWithChildren) {
 
   const openProjectFile = useCallback(async (path: string) => {
     if (!native) {
-      rawDispatch({ type: "SET_PROJECT_PATH", path });
+      historyDispatch({ type: "project", action: { type: "SET_PROJECT_PATH", path } });
       return;
     }
     const project = await openNativeProject(path);
@@ -66,24 +118,24 @@ export function ProjectProvider({ children }: PropsWithChildren) {
       if (!approved) throw new Error("Project open canceled before linked source authorization.");
       await Promise.all(linkedPaths.map((linkedPath) => authorizeNativePath(linkedPath)));
     }
-    rawDispatch({ type: "OPEN_PROJECT", project, path });
+    historyDispatch({ type: "project", action: { type: "OPEN_PROJECT", project, path } });
   }, [native]);
 
   const saveProjectFile = useCallback(async (path = state.ui.filePath) => {
     if (!path) throw new Error("Choose a .voxelweave destination before saving.");
     if (native) await saveNativeProject(path, documentFromState(state));
     else saveProject(documentFromState(state));
-    rawDispatch({ type: "SET_PROJECT_PATH", path });
-    rawDispatch({ type: "SET_TOAST", message: `Saved ${path.split(/[\\/]/).pop()}` });
+    historyDispatch({ type: "project", action: { type: "SET_PROJECT_PATH", path } });
+    historyDispatch({ type: "project", action: { type: "SET_TOAST", message: `Saved ${path.split(/[\\/]/).pop()}` } });
   }, [native, state]);
 
   const runOperation = useCallback(async <T,>(operation: () => Promise<T>, successMessage?: string) => {
     const result = await operation();
-    if (successMessage) rawDispatch({ type: "SET_TOAST", message: successMessage });
+    if (successMessage) historyDispatch({ type: "project", action: { type: "SET_TOAST", message: successMessage } });
     return result;
   }, []);
 
-  const value = useMemo(() => ({ state, dispatch, sidecar, runOperation, openProjectFile, saveProjectFile }), [dispatch, openProjectFile, runOperation, saveProjectFile, sidecar, state]);
+  const value = useMemo(() => ({ state, dispatch, sidecar, runOperation, openProjectFile, saveProjectFile, undoSceneEdit, redoSceneEdit, canUndoSceneEdit: history.past.length > 0, canRedoSceneEdit: history.future.length > 0 }), [dispatch, history.future.length, history.past.length, openProjectFile, redoSceneEdit, runOperation, saveProjectFile, sidecar, state, undoSceneEdit]);
   return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>;
 }
 

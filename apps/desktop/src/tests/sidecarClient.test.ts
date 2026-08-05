@@ -54,7 +54,7 @@ describe("native sidecar bridge", () => {
     const project = structuredClone(syntheticProjectDocument);
     project.source = { ...project.source, path: "/Users/test/CT", seriesUid: "series-local", sliceCount: 12 };
     project.selection = { ...project.selection, start: 2, end: 8, tileLabels: ["A", "B"], tilePlateColumns: 2, tilePlateRows: 1, tileThicknessMm: 0.4, created: true };
-    project.scene = [...project.scene, { id: "mesh-1", name: "Imported mesh", kind: "fixture", region: "measurement", tool: "T1", sourcePath: "/Users/test/mesh.stl", transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 2, y: 2, z: 2 } }, dimensionsMm: { x: 2, y: 2, z: 2 }, vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], faces: [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], visible: true }];
+    project.scene = [...project.scene, { id: "mesh-1", name: "Imported mesh", kind: "fixture", region: "measurement", tool: "T1", sourcePath: "/Users/test/mesh.stl", transform: { position: { x: 10, y: 20, z: 30 }, rotation: { x: 0, y: 0, z: 90 }, scale: { x: 4, y: 6, z: 8 } }, dimensionsMm: { x: 2, y: 2, z: 2 }, sourceDimensionsMm: { x: 2, y: 2, z: 2 }, sourceCenterMm: { x: 5, y: 10, z: 15 }, vertices: [[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]], faces: [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], visible: true }];
     const client = new NativeSidecarClient();
     const selection = await client.createPrintSelection(project);
     expect(selection.selectionId).toBe("native-selection-1");
@@ -70,9 +70,13 @@ describe("native sidecar bridge", () => {
     ]));
     const validated = await client.validateScene(project);
     expect(validated.valid).toBe(true);
-    const sceneRequest = (invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "validate_scene") as { payload: { scene: { regions: Array<{ source_path?: string; geometry: { dimensions: { x: number; y: number; z: number }; vertices?: number[][]; faces?: number[][] } }> } } });
+    const sceneRequest = (invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "validate_scene") as { payload: { scene: { regions: Array<{ source_path?: string; bounds_mm: { x: number[]; y: number[]; z: number[] }; transform: { position: { x: number; y: number; z: number }; scale: { x: number; y: number; z: number } }; geometry: { dimensions: { x: number; y: number; z: number }; vertices?: number[][]; faces?: number[][] } }> } } });
     const importedRegion = sceneRequest.payload.scene.regions.find((region) => region.source_path?.endsWith("mesh.stl"));
     expect(importedRegion).toMatchObject({ source_path: "/Users/test/mesh.stl" });
+    expect(importedRegion?.geometry.dimensions).toEqual({ x: 2, y: 2, z: 2 });
+    expect(importedRegion?.transform.scale).toEqual({ x: 4, y: 6, z: 8 });
+    expect(importedRegion?.bounds_mm).toEqual({ x: [7, 13], y: [18, 22], z: [26, 34] });
+    expect(importedRegion?.transform.position).toEqual({ x: 40, y: 10, z: -30 });
     expect(importedRegion?.geometry.vertices).toBeUndefined();
     expect(importedRegion?.geometry.faces).toBeUndefined();
     expect(JSON.stringify(sceneRequest).length).toBeLessThan(256 * 1024);

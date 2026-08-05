@@ -7,10 +7,15 @@ type WorkerObject = {
   dimensions?: { x: number; y: number; z: number };
   vertices?: number[][];
   faces?: number[][];
+  transform?: {
+    position: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number };
+    scale: { x: number; y: number; z: number };
+  };
   boolean?: { operation: "union" | "subtract" | "intersect"; operands: string[] };
 };
 
-type PreviewRequest = { operation: "preview"; scene: WorkerObject[] };
+type PreviewRequest = { operation: "preview"; requestId: number; scene: WorkerObject[] };
 let runtimePromise: ReturnType<typeof ManifoldModule> | undefined;
 
 async function runtime() {
@@ -59,9 +64,10 @@ async function validateScene(scene: WorkerObject[]) {
 
 self.addEventListener("message", (event: MessageEvent<PreviewRequest>) => {
   if (event.data?.operation !== "preview") return;
+  const requestId = event.data.requestId;
   void validateScene(event.data.scene).then((summary) => {
-    self.postMessage({ ok: true, ...summary, message: `manifold3d WASM validated ${summary.operandIds.length} operands` });
+    self.postMessage({ ok: true, requestId, ...summary, message: `manifold3d WASM checked ${summary.operandIds.length} preview operands` });
   }).catch((error: unknown) => {
-    self.postMessage({ ok: false, message: error instanceof Error ? error.message : "manifold3d WASM validation failed" });
+    self.postMessage({ ok: false, requestId, message: error instanceof Error ? error.message : "manifold3d WASM preview check failed" });
   });
 });

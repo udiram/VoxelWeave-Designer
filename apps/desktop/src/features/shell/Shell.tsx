@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from "react";
+import { useEffect, type PropsWithChildren } from "react";
 import { useProject } from "../../state/ProjectContext";
 import type { WorkspaceId } from "../../types";
 import { Icon, type IconName } from "../../components/icons";
@@ -16,9 +16,21 @@ export const WORKSPACES: Array<{ id: WorkspaceId; label: string; icon: IconName 
 ];
 
 export function Shell({ children }: PropsWithChildren) {
-  const { state, dispatch, openProjectFile, saveProjectFile } = useProject();
+  const { state, dispatch, openProjectFile, saveProjectFile, undoSceneEdit, redoSceneEdit } = useProject();
   const workspace = WORKSPACES.find((item) => item.id === state.ui.workspace) ?? WORKSPACES[0];
   const native = isNativeRuntime();
+
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent) => {
+      if (state.ui.workspace !== "design" || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") return;
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      event.preventDefault();
+      if (event.shiftKey) redoSceneEdit(); else undoSceneEdit();
+    };
+    window.addEventListener("keydown", handleHistoryShortcut);
+    return () => window.removeEventListener("keydown", handleHistoryShortcut);
+  }, [redoSceneEdit, state.ui.workspace, undoSceneEdit]);
 
   const handleOpenProject = async () => {
     if (!native) {
@@ -49,8 +61,8 @@ export function Shell({ children }: PropsWithChildren) {
 
   return <div className="app-frame">
     <header className="app-header">
-      <div className="titlebar">
-        <div className="traffic-lights" aria-hidden="true"><span className="traffic red" /><span className="traffic yellow" /><span className="traffic green" /></div>
+      <div className={`titlebar ${native ? "native-titlebar" : "browser-titlebar"}`}>
+        {!native && <div className="traffic-lights" aria-hidden="true"><span className="traffic red" /><span className="traffic yellow" /><span className="traffic green" /></div>}
         <span className="product-title">VoxelWeave Designer</span>
         <span className="title-divider" aria-hidden="true" />
         <span className="document-title">{state.name}</span>
@@ -68,7 +80,7 @@ export function Shell({ children }: PropsWithChildren) {
         </nav>
         <div className="toolbar-actions"><IconButton label="Project information" icon="info" onClick={() => dispatch({ type: "SET_TOAST", message: "Research-only project · no patient identifiers stored" })} /><IconButton label="Settings" icon="settings" onClick={() => dispatch({ type: "SET_TOAST", message: "Desktop settings are local to this project" })} /><IconButton label="Open command menu" icon="more" onClick={() => dispatch({ type: "SET_TOAST", message: "Command menu: use the six workspace tabs to move through the run" })} /></div>
       </div>
-      <div className="mobile-workspace-context"><Icon name={workspace.icon} size={16} /><span>{workspace.label}</span><span className="mobile-context-note">{state.name}</span><button className="mobile-project-action" type="button" onClick={() => void handleOpenProject()} aria-label={native ? "Open project" : "Open synthetic project"} data-testid={native ? "open-project-mobile" : "open-synthetic-project-mobile"}><Icon name="folder" size={14} /></button></div>
+      <div className="mobile-workspace-context"><Icon name={workspace.icon} size={16} /><label className="mobile-workspace-switch"><span className="sr-only">Switch workspace</span><select aria-label="Switch workspace" value={state.ui.workspace} onChange={(event) => dispatch({ type: "SET_WORKSPACE", workspace: event.target.value as WorkspaceId })}>{WORKSPACES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><span className="mobile-context-note">{state.name}</span><button className="mobile-project-action" type="button" onClick={() => void handleOpenProject()} aria-label={native ? "Open project" : "Open synthetic project"} data-testid={native ? "open-project-mobile" : "open-synthetic-project-mobile"}><Icon name="folder" size={14} /></button></div>
     </header>
     <main className={`app-main workspace-${state.ui.workspace}`} aria-label={`${workspace.label} workspace`}>{children}</main>
     <div className="toast-region" aria-live="polite" aria-atomic="true">{state.ui.toast && <div className="toast-message"><Icon name="info" size={15} /><span>{state.ui.toast}</span><button type="button" onClick={() => dispatch({ type: "CLEAR_TOAST" })} aria-label="Dismiss notification">×</button></div>}</div>
@@ -78,9 +90,9 @@ export function Shell({ children }: PropsWithChildren) {
 export function AppStatusBar({ crosshair = "24.6, −112.4, 38.0 mm · −782 HU", warning = false }: { crosshair?: string; warning?: boolean }) {
   const { state } = useProject();
   return <footer className="status-bar" aria-label="Project evidence status">
-    <div className="status-item"><Icon name="database" size={16} /><span>Scientific source: <strong>full-resolution HU cache</strong></span></div>
-    <div className="status-item"><Icon name="cube" size={16} /><span>Preview: <strong>{state.source.cache.preview}</strong></span></div>
-    <div className="status-item status-crosshair" aria-live="polite"><Icon name="crosshair" size={16} /><span>Crosshair: <strong>{crosshair}</strong></span></div>
+    <div className="status-item"><Icon name="database" size={16} /><span>Scientific source: <strong title="full-resolution HU cache">full-resolution HU cache</strong></span></div>
+    <div className="status-item"><Icon name="cube" size={16} /><span>Preview: <strong title={state.source.cache.preview}>{state.source.cache.preview}</strong></span></div>
+    <div className="status-item status-crosshair" aria-live="polite"><Icon name="crosshair" size={16} /><span>Crosshair: <strong title={crosshair}>{crosshair}</strong></span></div>
     <div className={`status-item status-boundary ${warning ? "is-warning" : ""}`} aria-live="polite">{warning ? <Icon name="warning" size={16} /> : <Icon name="checkCircle" size={16} />}<span>{warning ? "1 review item" : "No automatic print start"}</span></div>
   </footer>;
 }
