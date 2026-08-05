@@ -86,14 +86,14 @@ def _sample_voxel_array(volume: Volume, voxel_xyz: np.ndarray, *, method: str) -
     y = np.clip(voxel_xyz[..., 1], 0.0, volume.shape_zyx[1] - 1.0)
     z = np.clip(voxel_xyz[..., 2], 0.0, volume.shape_zyx[0] - 1.0)
     if method == "nearest":
-        return volume.hu[np.rint(z).astype(np.int64), np.rint(y).astype(np.int64), np.rint(x).astype(np.int64)]
+        return np.asarray(volume.hu[np.rint(z).astype(np.int64), np.rint(y).astype(np.int64), np.rint(x).astype(np.int64)], dtype=np.float32)
     if method != "linear":
         raise ValueError("MPR sampling method must be nearest or linear.")
     try:
-        from scipy.ndimage import map_coordinates  # type: ignore[import-untyped]
+        from scipy.ndimage import map_coordinates
 
         coords = np.stack((z.ravel(), y.ravel(), x.ravel()), axis=0)
-        return map_coordinates(volume.hu, coords, order=1, mode="nearest").reshape(x.shape).astype(np.float32)
+        return np.asarray(map_coordinates(volume.hu, coords, order=1, mode="nearest").reshape(x.shape), dtype=np.float32)
     except ImportError:
         flat = np.empty(x.size, dtype=np.float32)
         for index, point in enumerate(zip(x.ravel(), y.ravel(), z.ravel(), strict=True)):
@@ -194,7 +194,7 @@ def request_volume_preview(
         array = volume.hu[np.ix_(*indices)].astype(np.float32)
     else:
         try:
-            from scipy.ndimage import zoom  # type: ignore[import-untyped]
+            from scipy.ndimage import zoom
 
             array = zoom(volume.hu, target_shape / source_shape, order=1, mode="nearest", prefilter=False).astype(np.float32)
         except ImportError:

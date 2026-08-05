@@ -82,6 +82,49 @@ class ReleaseEvidenceTests(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("SHA-256 mismatch", invalid.stderr)
 
+    def test_stable_manifest_is_fail_closed_without_accepted_notarization(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="voxelweave-stable-evidence-") as directory:
+            root = Path(directory)
+            assets = root / "assets"
+            assets.mkdir()
+            (assets / "VoxelWeave-Designer-stable-macos-arm64.app.zip").write_bytes(b"app-bytes")
+            (assets / "VoxelWeave-Designer-stable-macos-arm64.dmg").write_bytes(b"dmg-bytes")
+            status = root / "signing.json"
+            status.write_text(
+                json.dumps(
+                    {
+                        "status": "development-prerelease-not-notarized",
+                        "signed": False,
+                        "notarized": False,
+                        "notarizationStatus": "not-performed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    str(CREATE),
+                    "--artifact-dir",
+                    str(assets),
+                    "--output-dir",
+                    str(root),
+                    "--version",
+                    "stable-test",
+                    "--git-sha",
+                    "6ce3895",
+                    "--channel",
+                    "stable",
+                    "--signing-status-file",
+                    str(status),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("stable evidence requires both signed=true and notarized=true", rejected.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,7 +212,7 @@ def create_print_selection(
     natural_size = tuple(float((high[axis] - low[axis] + 1.0) * (volume.spacing_mm[2 - axis] if axis < 2 else volume.spacing_mm[0])) for axis in inplane_axes)
     if any(item <= 0 for item in natural_size):
         raise GeometryValidationError("Print selection crop has no positive in-plane extent.")
-    requested_size = cast(Vec3, print_size_mm or (natural_size[0], natural_size[1], depth_mm))
+    requested_size = print_size_mm or (natural_size[0], natural_size[1], depth_mm)
     if len(requested_size) != 3 or any(float(item) <= 0 or not math.isfinite(float(item)) for item in requested_size):
         raise GeometryValidationError("Print size must contain three positive finite dimensions.")
     requested_size = cast(Vec3, tuple(float(item) for item in requested_size))

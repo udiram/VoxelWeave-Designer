@@ -15,6 +15,9 @@ EOF
 output_dir=".railway/bundle"
 while (($# > 0)); do
   case "$1" in
+    --)
+      shift
+      ;;
     --output-dir)
       (($# >= 2)) || { usage; exit 2; }
       output_dir="$2"

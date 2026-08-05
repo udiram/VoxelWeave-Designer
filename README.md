@@ -38,7 +38,7 @@ pnpm run setup
 pnpm run check
 ```
 
-`pnpm run setup` installs each present workspace independently and does not run package lifecycle scripts. Use separate terminals for `pnpm run dev:desktop` and `pnpm run dev:site` when those workspaces are present. `pnpm run railway:bundle` builds and stages the site plus release API without editing their source directories.
+`pnpm run setup` installs each present workspace independently, honors the workspace-approved native lifecycle builds (including esbuild and sharp), and creates `engine/.venv` with the engine test dependencies. Set `VOXELWEAVE_SKIP_PYTHON_SETUP=1` only when that environment is managed separately. Use separate terminals for `pnpm run dev:desktop` and `pnpm run dev:site` when those workspaces are present. `pnpm run railway:bundle` builds and stages the site plus release API without editing their source directories.
 
 ## Quality gates
 
@@ -50,7 +50,7 @@ The root gates are conditional until the product stacks are present, but their i
 - Mach-O architecture inspection for every app, sidecar, native extension, and framework;
 - release evidence schema, SHA-256, local-link, and workflow validation.
 
-Run focused gates with `pnpm run check:contracts`, `pnpm run check:desktop`, `pnpm run check:site-service`, `pnpm run check:architecture`, `pnpm run test:release-evidence`, and `pnpm run check:links`.
+Run focused gates with `pnpm run check:contracts`, `pnpm run check:cross-runtime`, `pnpm run check:desktop`, `pnpm run check:site-service`, `pnpm run check:architecture`, `pnpm run test:release-evidence`, and `pnpm run check:links`.
 
 ## Release and downloads
 

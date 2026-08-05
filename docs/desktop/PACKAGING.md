@@ -22,6 +22,29 @@ scripts/inspect-architectures.sh \
   "$(cat /tmp/voxelweave-bundle/app-path.txt)"
 ```
 
+`build-tauri-release.sh` first runs `scripts/build-sidecar.sh`. That helper
+creates a PyInstaller one-file executable from `engine[release]`, using the
+package-aware `engine/sidecar_entry.py` launcher, and places it at
+`apps/desktop/src-tauri/resources/voxelweave-sidecar` for Tauri to embed. It
+requires an arm64 macOS host and verifies both the Mach-O file type and an
+exact `lipo -archs` result of `arm64`; it does not fall back to system Python,
+Rosetta, or a universal binary. To select a supported Python 3.12 runtime,
+set `VOXELWEAVE_PYTHON` before running the helper.
+
+The sidecar smoke and cross-runtime proof can be run independently:
+
+```sh
+scripts/build-sidecar.sh --output apps/desktop/src-tauri/resources/voxelweave-sidecar
+python3 scripts/cross-runtime-e2e.py \
+  --sidecar apps/desktop/src-tauri/resources/voxelweave-sidecar \
+  --output-dir /tmp/voxelweave-cross-runtime
+```
+
+The proof creates and reopens a `.voxelweave` document, exercises the bundled
+JSONL sidecar and correlated errors, emits a deterministic package, and checks
+that changing preview resolution leaves the G-code SHA-256 unchanged. Its
+physical-fidelity field is deliberately `not_established_by_software`.
+
 The build helper refuses a missing desktop workspace, missing Tauri configuration, a non-macOS host, an unexpected target, an existing non-empty output directory, or an ambiguous bundle result. It does not add a compatibility build for another architecture.
 
 ## Signing lanes

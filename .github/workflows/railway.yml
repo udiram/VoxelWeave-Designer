@@ -16,8 +16,6 @@ jobs:
   bundle:
     name: Build combined site and release API bundle
     runs-on: ubuntu-24.04
-    env:
-      BUNDLE_DIR: ${{ runner.temp }}/voxelweave-railway-bundle
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -25,10 +23,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 11.17.0
+      - name: Allocate bundle directory
+        run: echo "BUNDLE_DIR=$RUNNER_TEMP/voxelweave-railway-bundle" >> "$GITHUB_ENV"
       - name: Install workspace dependencies
         run: pnpm run setup
       - name: Build site and release API staging bundle

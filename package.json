@@ -15,6 +15,7 @@
     "build": "scripts/run-workspace-suite.sh --label build --scripts build --paths apps/desktop apps/site services/release-api",
     "test:e2e": "scripts/run-workspace-suite.sh --label Playwright --playwright --paths apps/desktop apps/site services/release-api",
     "check:contracts": "scripts/check-python-contracts.sh",
+    "check:cross-runtime": "python3 scripts/cross-runtime-e2e.py",
     "check:desktop": "scripts/run-workspace-suite.sh --label desktop --scripts lint typecheck test build --playwright --paths apps/desktop",
     "check:site-service": "scripts/run-workspace-suite.sh --label site-service --scripts lint typecheck test build --playwright --paths apps/site services/release-api",
     "check:architecture": "scripts/run-architecture-check.sh",

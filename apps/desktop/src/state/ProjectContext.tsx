@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, type PropsWithChildren } from "react";
 import { syntheticProjectDocument } from "../data/fixtures";
-import { DeterministicSidecarClient, type SidecarClient } from "../services/sidecarClient";
+import { createSidecarClient, type SidecarClient } from "../services/sidecarClient";
 import { recoverProject, saveProject } from "../services/projectDocument";
 import type { ProjectAction, ProjectDocument, ProjectState } from "../types";
 import { createInitialProjectState, projectReducer } from "./projectState";
@@ -23,7 +23,7 @@ export function ProjectProvider({ children }: PropsWithChildren) {
   const recovered = typeof window !== "undefined" ? recoverProject() : null;
   const initialState = recovered ? { ...recovered, ui: createInitialProjectState(true).ui } : createInitialProjectState();
   const [state, rawDispatch] = useReducer(projectReducer, initialState);
-  const sidecar = useMemo(() => new DeterministicSidecarClient(), []);
+  const sidecar = useMemo(() => createSidecarClient(), []);
 
   const dispatch = useCallback((action: ProjectAction) => {
     rawDispatch(action);

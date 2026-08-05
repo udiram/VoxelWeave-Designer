@@ -24,6 +24,9 @@ test = [
   "mypy>=1.10,<2",
   "scipy>=1.11,<2",
 ]
+release = [
+  "pyinstaller>=6.10,<7",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -41,7 +44,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 files = ["src"]
 strict = true
 ignore_missing_imports = true

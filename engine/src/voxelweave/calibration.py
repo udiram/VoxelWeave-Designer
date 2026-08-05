@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -34,7 +34,7 @@ class CalibrationBinding:
         return self.flow_mm3_s if self.flow_mm3_per_min is None else self.flow_mm3_per_min / 60.0
 
     def to_dict(self) -> dict[str, Any]:
-        return canonicalize(
+        return cast(dict[str, Any], canonicalize(
             {
                 "pitch_mm": self.pitch_mm,
                 "layer_height_mm": self.layer_height_mm,
@@ -48,7 +48,7 @@ class CalibrationBinding:
                 "flow_mm3_s": self.flow_mm3_s,
                 "flow_mm3_per_min": self.flow_mm3_per_min,
             }
-        )
+        ))
 
     def matches(self, other: CalibrationBinding, *, tolerance_mm: float = 1e-6) -> bool:
         float_fields = ("pitch_mm", "layer_height_mm", "nozzle_mm")
@@ -213,7 +213,7 @@ class RailSample:
     range_status: str
 
     def to_dict(self) -> dict[str, Any]:
-        return canonicalize(
+        return cast(dict[str, Any], canonicalize(
             {
                 "occupied": self.occupied,
                 "source_position_lps": self.source_position_lps,
@@ -228,7 +228,7 @@ class RailSample:
                 "commanded_width_mm": self.commanded_width_mm,
                 "range_status": self.range_status,
             }
-        )
+        ))
 
 
 @dataclass(slots=True)

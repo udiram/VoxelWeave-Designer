@@ -62,7 +62,11 @@ python3 scripts/verify-release-evidence.py \
   --artifact-root /tmp/voxelweave-release
 ```
 
-The GitHub workflow runs this same sequence and uploads the `.app.zip`, DMG, `SHA256SUMS`, and `release-evidence.json` to the GitHub release. The public Railway site should read those release records through `services/release-api` and present the current artifact hashes; it must not invent a version or test count.
+The GitHub workflow runs this same sequence and uploads the `.app.zip`, DMG,
+`SHA256SUMS`, `architecture-report.txt`, and `release-evidence.json` to the
+GitHub release. The public Railway site should read those release records
+through `services/release-api` and present the current artifact hashes; it
+must not invent a version or test count.
 
 ## Evidence contract
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 scripts/check-python-contracts.sh
+python3 scripts/cross-runtime-e2e.py
 scripts/run-workspace-suite.sh --label desktop --scripts lint typecheck test build --playwright --paths apps/desktop
 scripts/run-workspace-suite.sh --label site-service --scripts lint typecheck test build --playwright --paths apps/site services/release-api
 scripts/run-architecture-check.sh

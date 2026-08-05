@@ -15,6 +15,33 @@ from typing import Any
 from .errors import ProtocolError
 from .models import canonicalize
 
+MAX_JSONL_BYTES = 256 * 1024
+MAX_REQUEST_ID_BYTES = 128
+MAX_JSON_DEPTH = 12
+MAX_ARRAY_ITEMS = 4096
+MAX_STRING_BYTES = 64 * 1024
+
+
+def _validate_bounded(value: Any, *, depth: int = 0, location: str = "payload") -> None:
+    """Reject payloads that could smuggle binary data through JSONL."""
+
+    if depth > MAX_JSON_DEPTH:
+        raise ProtocolError(f"{location} exceeds the maximum JSON nesting depth.")
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > MAX_STRING_BYTES:
+            raise ProtocolError(f"{location} contains an oversized string; use a scoped artifact path instead.")
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            _validate_bounded(str(key), depth=depth + 1, location=f"{location}.key")
+            _validate_bounded(child, depth=depth + 1, location=f"{location}.{key}")
+        return
+    if isinstance(value, (tuple, list)):
+        if len(value) > MAX_ARRAY_ITEMS:
+            raise ProtocolError(f"{location} contains too many array items; use a scoped binary artifact instead.")
+        for index, child in enumerate(value):
+            _validate_bounded(child, depth=depth + 1, location=f"{location}[{index}]")
+
 
 class Operation(StrEnum):
     INSPECT_DICOM_SOURCE = "inspect_dicom_source"
@@ -44,12 +71,15 @@ class ControlEnvelope:
     protocol: str = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
-        if not self.request_id or "\n" in self.request_id:
+        if not self.request_id or "\n" in self.request_id or "\r" in self.request_id:
             raise ProtocolError("Control request_id must be a non-empty single-line value.")
+        if len(self.request_id.encode("utf-8")) > MAX_REQUEST_ID_BYTES:
+            raise ProtocolError("Control request_id is too long.")
         if self.protocol != PROTOCOL_VERSION:
             raise ProtocolError(f"Unsupported control protocol: {self.protocol}.")
         if self.payload is None:
             object.__setattr__(self, "payload", {})
+        _validate_bounded(self.payload)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,7 +90,10 @@ class ControlEnvelope:
         }
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > MAX_JSONL_BYTES:
+            raise ProtocolError("Control envelope exceeds the bounded JSONL line limit.")
+        return encoded
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ControlEnvelope:
@@ -83,6 +116,8 @@ class ControlEnvelope:
 
     @classmethod
     def from_json(cls, value: str) -> ControlEnvelope:
+        if len(value.encode("utf-8")) > MAX_JSONL_BYTES:
+            raise ProtocolError("Control envelope exceeds the bounded JSONL line limit.")
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError as exc:

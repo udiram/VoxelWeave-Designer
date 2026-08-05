@@ -70,6 +70,7 @@ if [[ -n "$(ls -A "$output_dir" 2>/dev/null)" ]]; then
 fi
 
 echo "[tauri] building target=$target from apps/desktop"
+scripts/build-sidecar.sh --output apps/desktop/src-tauri/resources/voxelweave-sidecar
 pnpm --dir apps/desktop exec tauri build --target "$target" --bundles app,dmg
 
 bundle_roots=(

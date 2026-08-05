@@ -55,7 +55,7 @@ class DicomSeriesSummary:
     multiframe: bool
 
     def to_dict(self) -> dict[str, Any]:
-        return canonicalize(
+        return cast(dict[str, Any], canonicalize(
             {
                 "series_uid": self.series_uid,
                 "modality": self.modality,
@@ -67,7 +67,7 @@ class DicomSeriesSummary:
                 "source_names": self.source_names,
                 "multiframe": self.multiframe,
             }
-        )
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +155,7 @@ class Volume:
     def voxel_to_lps(self, voxel_xyz: Sequence[float]) -> np.ndarray:
         x, y, z = (float(item) for item in voxel_xyz)
         dx, dy, dz = self.spacing_mm[2], self.spacing_mm[1], self.spacing_mm[0]
-        return self.origin_lps + self.direction_lps @ np.asarray([x * dx, y * dy, z * dz], dtype=np.float64)
+        return np.asarray(self.origin_lps + self.direction_lps @ np.asarray([x * dx, y * dy, z * dz], dtype=np.float64), dtype=np.float64)
 
     def lps_to_voxel(self, position_lps: Sequence[float]) -> np.ndarray:
         dx, dy, dz = self.spacing_mm[2], self.spacing_mm[1], self.spacing_mm[0]
@@ -230,7 +230,9 @@ def _spacing(value: Any) -> tuple[float, float] | None:
         result = tuple(float(item) for item in value)
     except (TypeError, ValueError):
         return None
-    return result if len(result) == 2 and all(math.isfinite(item) and item > 0 for item in result) else None  # type: ignore[return-value]
+    if len(result) != 2 or not all(math.isfinite(item) and item > 0 for item in result):
+        return None
+    return result[0], result[1]
 
 
 def _sequence_item(value: Any, name: str, index: int = 0) -> Any | None:
@@ -294,7 +296,10 @@ def _frame_records(path: Path, ds: Dataset) -> tuple[list[DicomInstance], np.nda
             position_value = getattr(ds, "ImagePositionPatient", None)
         position = _position(position_value)
         if position is None and base_position is not None and frames > 1:
-            position = tuple((np.asarray(base_position) + normal * default_spacing * frame_index).tolist())  # type: ignore[assignment]
+            position = as_vec3(
+                (np.asarray(base_position) + normal * default_spacing * frame_index).tolist(),
+                name="ImagePositionPatient",
+            )
         spacing = _spacing(_frame_value(ds, frame_index, "PixelMeasuresSequence", "PixelSpacing"))
         if spacing is None:
             spacing = _spacing(getattr(ds, "PixelSpacing", None))

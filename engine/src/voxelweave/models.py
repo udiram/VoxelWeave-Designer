@@ -21,7 +21,7 @@ def as_vec3(value: Any, *, name: str) -> Vec3:
         raise ValueError(f"{name} must contain three finite numbers.") from exc
     if len(result) != 3 or not all(np.isfinite(result)):
         raise ValueError(f"{name} must contain three finite numbers.")
-    return result  # type: ignore[return-value]
+    return result
 
 
 def canonicalize(value: Any) -> Any:

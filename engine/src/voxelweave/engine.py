@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import mkdtemp
+from threading import Lock
 from typing import Any, cast
 
 from .binary import write_binary_array
@@ -21,6 +24,7 @@ from .mpr import (
 from .protocol import ControlEnvelope, Operation
 from .scanback import verify_scan_back
 from .selection import create_print_selection
+from .synthetic import synthetic_scan_back, write_synthetic_dicom_series
 from .toolpath import PrinterProfile, export_run_package, generate_toolpath, reverse_audit_gcode
 
 
@@ -38,18 +42,56 @@ class EngineSession:
     selection: Any | None = None
     generated: Any | None = None
     _cancellations: dict[str, CancellationToken] = field(default_factory=dict)
+    _cancellation_lock: Lock = field(default_factory=Lock)
+    _workspace: Path = field(default_factory=lambda: Path(mkdtemp(prefix="voxelweave-sidecar-")))
 
     def _token(self, request_id: str) -> CancellationToken:
-        token = CancellationToken()
-        self._cancellations[request_id] = token
+        with self._cancellation_lock:
+            token = self._cancellations.get(request_id)
+            if token is None:
+                token = CancellationToken()
+                self._cancellations[request_id] = token
         return token
 
+    def register_request(self, request_id: str) -> None:
+        """Reserve a cooperative token before a worker thread starts."""
+
+        self._token(request_id)
+
     def cancel(self, request_id: str) -> dict[str, Any]:
-        token = self._cancellations.get(request_id)
+        with self._cancellation_lock:
+            token = self._cancellations.get(request_id)
         if token is None:
             return {"request_id": request_id, "cancelled": False, "reason": "unknown_request"}
         token.cancel()
         return {"request_id": request_id, "cancelled": True}
+
+    def _resolve_source(self, source: str) -> str:
+        """Resolve the explicit non-PHI synthetic fixture URI used by desktop smoke flows."""
+
+        if not source.startswith("synthetic://"):
+            return source
+        fixture_name = source.removeprefix("synthetic://").strip("/").replace("/", "-") or "fixture"
+        fixture_path = self._workspace / "fixtures" / fixture_name
+        if not any(fixture_path.glob("*.dcm")):
+            if fixture_name.endswith("scan-back"):
+                if self.volume is None:
+                    raise EngineError("Create the synthetic source before requesting synthetic scan-back evidence.")
+                write_synthetic_dicom_series(fixture_path, volume=synthetic_scan_back(self.volume, noise_hu=2.0))
+            else:
+                write_synthetic_dicom_series(
+                    fixture_path,
+                    pattern="phantom",
+                    shape_zyx=(12, 32, 40),
+                    spacing_mm=(1.0, 1.0, 1.0),
+                )
+        return str(fixture_path)
+
+    def _workspace_path(self, value: object, default_name: str) -> str:
+        candidate = Path(str(value)) if value is not None else Path(default_name)
+        if not candidate.is_absolute():
+            candidate = self._workspace / candidate
+        return str(candidate)
 
     def _require_volume(self) -> Volume:
         if self.volume is None:
@@ -66,11 +108,11 @@ class EngineSession:
         try:
             op = envelope.operation
             if op == Operation.INSPECT_DICOM_SOURCE:
-                self.source = str(payload["source"])
+                self.source = self._resolve_source(str(payload["source"]))
                 self.inspection = inspect_dicom_source(self.source, request_id=envelope.request_id, cancellation=token, progress=callback)
                 return self.inspection.to_dict()
             if op == Operation.SELECT_DICOM_SERIES:
-                source = str(payload["source"]) if payload.get("source") is not None else self.source
+                source = self._resolve_source(str(payload["source"])) if payload.get("source") is not None else self.source
                 if source is None:
                     raise EngineError("Select a DICOM source before selecting a series.")
                 inspection = self.inspection if source == self.source and self.inspection is not None else inspect_dicom_source(source, request_id=envelope.request_id, cancellation=token, progress=callback)
@@ -79,7 +121,7 @@ class EngineSession:
                     self.volume = load_dicom_series(source, series_uid=summary.series_uid, request_id=envelope.request_id, cancellation=token, progress=callback)
                 return summary.to_dict()
             if op == Operation.BUILD_VOLUME_CACHE:
-                result = build_volume_cache(self._require_volume(), payload["directory"], request_id=envelope.request_id, cancellation=token, progress=callback)
+                result = build_volume_cache(self._require_volume(), self._workspace_path(payload.get("directory"), "cache"), request_id=envelope.request_id, cancellation=token, progress=callback)
                 return result
             if op == Operation.REQUEST_MPR_PLANE:
                 plane = request_mpr_plane(
@@ -92,14 +134,14 @@ class EngineSession:
                     cancellation=token,
                 )
                 if payload.get("output_path"):
-                    artifact = write_binary_array(payload["output_path"], plane.array, artifact_type="mpr_plane", metadata=plane.to_dict())
+                    artifact = write_binary_array(self._workspace_path(payload["output_path"], "mpr-plane.bin"), plane.array, artifact_type="mpr_plane", metadata=plane.to_dict())
                     return {"plane": plane.to_dict(), "artifact": {"path": artifact.path.name, "sha256": artifact.sha256, "header": artifact.header}}
                 return plane.to_dict()
             if op == Operation.REQUEST_VOLUME_PREVIEW:
                 preview = request_volume_preview(self._require_volume(), max_dimension=int(payload.get("max_dimension", 128)), cancellation=token)
                 if payload.get("output_path"):
                     artifact = write_binary_array(
-                        payload["output_path"],
+                        self._workspace_path(payload["output_path"], "volume-preview.bin"),
                         preview.array,
                         artifact_type="volume_preview",
                         metadata={
@@ -134,6 +176,7 @@ class EngineSession:
                     self.selection,
                     calibration,
                     profile=PrinterProfile(**dict(payload.get("profile", {}))),
+                    tool=(str(payload["tool"]) if payload.get("tool") is not None else None),
                     allow_calibration_clipping=bool(payload.get("allow_calibration_clipping", False)),
                     request_id=envelope.request_id,
                     cancellation=token,
@@ -143,14 +186,17 @@ class EngineSession:
             if op == Operation.REVERSE_AUDIT_GCODE:
                 target = payload.get("path", payload.get("gcode"))
                 if target is None:
-                    raise ProtocolError("reverse_audit_gcode requires path or gcode.")
+                    if self.generated is None:
+                        raise ProtocolError("reverse_audit_gcode requires path or gcode.")
+                    return reverse_audit_gcode(self.generated.gcode_text, expected=self.generated).to_dict()
                 return reverse_audit_gcode(target, expected=self.generated).to_dict()
             if op == Operation.EXPORT_RUN_PACKAGE:
                 if self.generated is None:
                     raise EngineError("Generate and audit a toolpath before exporting its run package.")
-                return export_run_package(self.generated, payload["directory"])
+                return export_run_package(self.generated, self._workspace_path(payload.get("directory"), "run-package"))
             if op == Operation.VERIFY_SCAN_BACK:
-                scan_back = load_dicom_series(payload["scan_back_source"], series_uid=payload.get("series_uid"), request_id=envelope.request_id, cancellation=token, progress=callback)
+                scan_back_source = self._resolve_source(str(payload["scan_back_source"]))
+                scan_back = load_dicom_series(scan_back_source, series_uid=payload.get("series_uid"), request_id=envelope.request_id, cancellation=token, progress=callback)
                 verification = verify_scan_back(
                     self._require_volume(),
                     scan_back,
@@ -163,7 +209,8 @@ class EngineSession:
                 return verification.to_dict()
             raise ProtocolError(f"Unsupported operation: {op.value}")
         finally:
-            self._cancellations.pop(envelope.request_id, None)
+            with self._cancellation_lock:
+                self._cancellations.pop(envelope.request_id, None)
 
 
 def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:

@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { PROJECT_SCHEMA_VERSION, type ProjectDocument } from "../types";
 
 const PROJECT_STORAGE_KEY = "voxelweave.project.v1";
@@ -45,4 +46,13 @@ export function recoverProject(storage: Storage = window.localStorage): ProjectD
 export function clearProjectStorage(storage: Storage = window.localStorage): void {
   storage.removeItem(PROJECT_STORAGE_KEY);
   storage.removeItem(RECOVERY_STORAGE_KEY);
+}
+
+export async function saveNativeProject(path: string, project: ProjectDocument): Promise<void> {
+  await invoke("save_voxelweave_document", { path, document: JSON.parse(serializeProject(project)) as ProjectDocument });
+}
+
+export async function openNativeProject(path: string): Promise<ProjectDocument> {
+  const document = await invoke<unknown>("open_voxelweave_document", { path });
+  return migrateProject(document);
 }

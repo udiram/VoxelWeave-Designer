@@ -24,8 +24,8 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
-    "icon": [],
-    "resources": [],
+    "icon": ["icons/icon.png"],
+    "resources": ["resources/voxelweave-sidecar"],
     "fileAssociations": [
       {
         "ext": ["voxelweave"],

@@ -1,6 +1,9 @@
 node_modules/
 dist/
 playwright-report/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/voxelweave-sidecar
 test-results/*
 !test-results/visual-evidence/
 test-results/visual-evidence/*
