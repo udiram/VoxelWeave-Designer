@@ -8,13 +8,13 @@ export function SendWorkspace() {
   const { state, dispatch, sidecar } = useProject();
   const [manifestOpen, setManifestOpen] = useState(true);
   const [exporting, setExporting] = useState(false);
-  const files = ["run.gcode", "run-report.json", "toolpath-trace.json", "dicom-selection.json", "transform.json"];
+  const files = state.send.files ?? ["toolpath.gcode", "toolpath_preview.bin", "toolpath_trace.bin", "selection_manifest.json", "source_to_print_transform.json", "run_report.json", "hashes.json"];
 
   const exportPackage = async () => {
     setExporting(true);
     try {
       const result = await sidecar.exportRunPackage(state, (event) => dispatch({ type: "SET_TOAST", message: `${event.stage} · ${Math.round(event.progress * 100)}%` }));
-      dispatch({ type: "EXPORT_RUN_PACKAGE", packageName: result.packageName, exportHash: result.exportHash });
+      dispatch({ type: "EXPORT_RUN_PACKAGE", packageName: result.packageName, packageDirectory: result.packageDirectory, exportHash: result.exportHash, files: result.files });
       dispatch({ type: "SET_TOAST", message: `Exported ${result.packageName} · ${result.exportHash}` });
     } catch (error) { dispatch({ type: "SET_TOAST", message: error instanceof Error ? error.message : "Run package export failed" }); }
     finally { setExporting(false); }
@@ -32,7 +32,7 @@ export function SendWorkspace() {
       <div className="center-toolbar"><div><span className="workspace-kicker">LOCAL EXPORT / ATTENDED HANDOFF</span><h1 id="send-heading">Send</h1></div><div className="tool-group"><IconButton label="Inspect package manifest" icon="file" onClick={() => setManifestOpen(true)} /><IconButton label="Send help" icon="help" onClick={() => dispatch({ type: "SET_TOAST", message: "Send never starts a printer automatically" })} /></div></div>
       <div className="send-hero"><div className="send-hero-copy"><span className="workspace-kicker">LOCAL EXPORT / ATTENDED HANDOFF</span><h2>{state.send.packageExported ? "Package ready for handoff" : "Export the audited run package"}</h2><p>{state.send.packageExported ? "The exact artifacts are ready for local inspection or an attended Prusa Connect handoff." : "The package contains plaintext G-code, manifests, transforms, exact preview data, and hashes."}</p><div className="send-actions"><Button variant="primary" icon={state.send.packageExported ? "check" : "download"} disabled={!state.toolpath.audited || exporting} onClick={exportPackage} data-testid="export-run-package">{exporting ? "Exporting…" : state.send.packageExported ? "Package exported" : "Export run package"}</Button><Button variant="secondary" icon="upload" onClick={() => dispatch({ type: "SET_TOAST", message: "Prusa Connect is optional; local export is complete and no upload was performed" })}>Prepare Prusa Connect handoff</Button></div></div><div className="receipt-block"><div className="receipt-line"><Icon name={state.toolpath.audited ? "checkCircle" : "lock"} size={19} /><span>Reverse audit</span><strong>{state.toolpath.audited ? "passed" : "blocked"}</strong></div><div className="receipt-line"><Icon name="database" size={19} /><span>Scientific source</span><strong>full-resolution HU cache</strong></div><div className="receipt-line"><Icon name="external" size={19} /><span>Printer action</span><strong>attended only · local export</strong></div></div></div>
       {state.send.packageExported ? <Notice tone="success" title="Local export complete">The run package is deterministic and inspectable. Software export does not prove deposited geometry or physical HU fidelity.</Notice> : <Notice tone="info" title="Export boundary">A successful preview or G-code generation never starts the printer. Physical validation remains a separate evidence step.</Notice>}
-      <div className="package-table"><div className="table-caption"><span>Package contents</span><span>{files.length} artifacts</span></div><table><thead><tr><th>Artifact</th><th>Purpose</th><th>State</th></tr></thead><tbody>{files.map((file, index) => <tr key={file}><td><code>{file}</code></td><td>{["Multi-tool machine instructions", "Provenance and run checks", "Generated segment trace", "Physical source selection", "Source-to-print transform"][index]}</td><td><StatusBadge tone={state.send.packageExported ? "ready" : "neutral"} icon={state.send.packageExported ? "check" : "lock"}>{state.send.packageExported ? "included" : "pending"}</StatusBadge></td></tr>)}</tbody></table></div>
+      <div className="package-table"><div className="table-caption"><span>Package contents</span><span>{files.length} artifacts</span></div><table><thead><tr><th>Artifact</th><th>Purpose</th><th>State</th></tr></thead><tbody>{files.map((file) => <tr key={file}><td><code>{file}</code></td><td>{artifactPurpose(file)}</td><td><StatusBadge tone={state.send.packageExported ? "ready" : "neutral"} icon={state.send.packageExported ? "check" : "lock"}>{state.send.packageExported ? "included" : "pending"}</StatusBadge></td></tr>)}</tbody></table></div>
     </section>
     <aside className="right-inspector send-inspector" aria-label="Send connection inspector">
       <div className="inspector-title"><div><span className="workspace-kicker">CONNECTION</span><h2>Prusa XL</h2></div><IconButton label="Connection options" icon="more" size={17} onClick={() => dispatch({ type: "SET_TOAST", message: "Connection settings stay in the native Tauri adapter" })} /></div>
@@ -43,4 +43,15 @@ export function SendWorkspace() {
     </aside>
     <AppStatusBar />
   </div>;
+}
+
+function artifactPurpose(file: string): string {
+  if (file === "toolpath.gcode") return "Audited machine instructions";
+  if (file === "toolpath_preview.bin") return "Exact generated segment preview";
+  if (file === "toolpath_trace.bin") return "Audited multi-tool trace";
+  if (file === "selection_manifest.json") return "Physical source selection";
+  if (file === "source_to_print_transform.json") return "Source-to-print transform";
+  if (file === "run_report.json") return "Run report and reverse audit";
+  if (file === "hashes.json") return "SHA-256 artifact index";
+  return "Sidecar-returned run artifact";
 }

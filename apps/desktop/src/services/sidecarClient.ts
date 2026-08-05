@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   DicomSelectionResult,
   DicomSource,
+  DicomSeriesCandidate,
   ExportPackageResult,
   ProgressEvent,
   ProjectDocument,
@@ -31,7 +32,7 @@ export type SidecarMode = "native" | "synthetic-browser-test";
 
 export interface DicomInspectionResult {
   source: DicomSource;
-  candidates: DicomSource["seriesCandidates"];
+  candidates: DicomSeriesCandidate[];
   warnings: string[];
 }
 
@@ -68,7 +69,7 @@ export interface SidecarClient {
   reverseAuditGcode(project: ProjectDocument): Promise<{ passed: boolean; checks: string[] }>;
   exportRunPackage(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ExportPackageResult>;
   verifyScanBack(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VerifyScanBackResult>;
-  exportVerificationReport(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; exportHash: string; files: string[] }>;
+  exportVerificationReport(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; packageDirectory?: string; exportHash: string; files: string[] }>;
   cancel(requestId: string): Promise<void>;
 }
 
@@ -124,7 +125,8 @@ function requireSource(project: ProjectDocument): string {
 }
 
 function sourcePayload(project: ProjectDocument): Record<string, unknown> {
-  return { source: requireSource(project), series_uid: project.source.seriesUid || undefined };
+  const inputs = project.source.inputPaths?.length ? project.source.inputPaths : [requireSource(project)];
+  return { source: inputs[0], sources: inputs, series_uid: project.source.seriesUid || undefined };
 }
 
 function nativeCacheDirectory(project: ProjectDocument): string {
@@ -141,10 +143,12 @@ function nativeArtifactPath(path: unknown, directory: string): string | undefine
 }
 
 function calibrationPayload(project: ProjectDocument): Array<Record<string, unknown>> {
-  return project.calibrations.filter((profile) => profile.accepted).map((profile) => ({
+  const profiles = project.calibrations.filter((profile) => profile.accepted);
+  if (!profiles.length) throw new Error("Generation requires at least one accepted calibration profile.");
+  return profiles.map((profile) => ({
     calibration_id: profile.id,
     binding: {
-      pitch_mm: profile.layerHeightMm,
+      pitch_mm: profile.pitchMm,
       layer_height_mm: profile.layerHeightMm,
       nozzle_mm: profile.nozzleMm,
       tool: profile.tool,
@@ -153,11 +157,13 @@ function calibrationPayload(project: ProjectDocument): Array<Record<string, unkn
       printer: profile.printer,
       scanner: profile.scanner,
       reconstruction: profile.reconstruction,
-      flow_mm3_s: 1,
+      flow_mm3_s: profile.flowMm3S,
     },
     commanded_width_mm: profile.huSamples.map((sample) => sample.widthMm),
     measured_hu_mean: profile.huSamples.map((sample) => sample.measuredHu),
+    measured_hu_sd: profile.huUncertainty ?? [],
     accepted: profile.accepted,
+    evidence_reference: profile.evidenceReference ?? "",
   }));
 }
 
@@ -169,6 +175,14 @@ function scenePayload(project: ProjectDocument): Record<string, unknown> {
       owner: `${object.tool}:${object.region}`,
       transform: object.transform,
       visible: object.visible,
+      geometry: {
+        kind: object.kind,
+        dimensions: object.dimensionsMm ?? object.transform.scale,
+        vertices: object.vertices,
+        faces: object.faces,
+        boolean_operands: object.boolean?.operands ?? [],
+        boolean_operation: object.boolean?.operation,
+      },
       dimensions_mm: object.dimensionsMm,
       source_path: object.kind === "dicom" && (!object.sourcePath || object.sourcePath.startsWith("synthetic://")) ? project.source.path : object.sourcePath,
       boolean_operands: object.boolean?.operands ?? [],
@@ -184,14 +198,18 @@ function nativeError(response: NativeResponse<unknown>): Error {
 
 function sourceFromInspection(project: ProjectDocument, inspection: Record<string, unknown>): DicomInspectionResult {
   const series = Array.isArray(inspection.series) ? inspection.series as Array<Record<string, unknown>> : [];
-  const eligible = series.find((candidate) => candidate.eligible !== false);
+  const eligibleCandidates = series.filter((candidate) => candidate.eligible !== false);
+  const selectedUid = project.source.seriesUid && eligibleCandidates.some((candidate) => String(candidate.series_uid) === project.source.seriesUid)
+    ? project.source.seriesUid
+    : eligibleCandidates.length === 1 ? String(eligibleCandidates[0]?.series_uid ?? "") : "";
+  const eligible = eligibleCandidates.find((candidate) => String(candidate.series_uid ?? "") === selectedUid);
   const spacing = (eligible?.spacing as Record<string, unknown> | undefined) ?? {};
   const dimensions = (eligible?.dimensions as Record<string, unknown> | undefined) ?? {};
   const source: DicomSource = {
     ...project.source,
     path: project.source.path,
     name: String(inspection.source_label ?? project.source.name),
-    seriesUid: String(eligible?.series_uid ?? project.source.seriesUid),
+    seriesUid: selectedUid,
     modality: "CT",
     sliceCount: Number(eligible?.instance_count ?? project.source.sliceCount),
     dimensions: {
@@ -204,7 +222,7 @@ function sourceFromInspection(project: ProjectDocument, inspection: Record<strin
       y: Number(spacing.y ?? project.source.spacing.y),
       z: Number(spacing.z ?? project.source.spacing.z),
     },
-    status: eligible?.eligible === false ? "needs-review" : "ready",
+    status: eligible ? "ready" : eligibleCandidates.length > 1 ? "needs-review" : "needs-review",
     seriesCandidates: series.map((candidate) => ({
       seriesUid: String(candidate.series_uid ?? ""),
       name: String(candidate.modality ?? "CT"),
@@ -214,7 +232,7 @@ function sourceFromInspection(project: ProjectDocument, inspection: Record<strin
       warnings: candidate.exclusion_reason ? [String(candidate.exclusion_reason)] : [],
     })),
   };
-  return { source, candidates: source.seriesCandidates, warnings: Array.isArray(inspection.warnings) ? inspection.warnings.map(String) : [] };
+  return { source, candidates: source.seriesCandidates ?? [], warnings: Array.isArray(inspection.warnings) ? inspection.warnings.map(String) : [] };
 }
 
 /** Native adapter. Every production operation crosses the Tauri JSONL boundary. */
@@ -251,14 +269,14 @@ export class NativeSidecarClient implements SidecarClient {
 
   async inspectDicomSource(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomInspectionResult> {
     const source = requireSource(project);
-    const inspection = await this.request<Record<string, unknown>>("inspect_dicom_source", { source }, onProgress);
+    const inspection = await this.request<Record<string, unknown>>("inspect_dicom_source", sourcePayload(project), onProgress);
     this.inspectedPath = source;
     return sourceFromInspection(project, inspection);
   }
 
   async selectDicomSeries(project: ProjectDocument, seriesUid?: string, onProgress?: (event: ProgressEvent) => void): Promise<DicomInspectionResult> {
     const source = requireSource(project);
-    const selected = await this.request<Record<string, unknown>>("select_dicom_series", { source, series_uid: (seriesUid ?? project.source.seriesUid) || undefined }, onProgress);
+    const selected = await this.request<Record<string, unknown>>("select_dicom_series", { ...sourcePayload(project), series_uid: (seriesUid ?? project.source.seriesUid) || undefined }, onProgress);
     this.selectedPath = source;
     return sourceFromInspection(project, { source_label: project.source.name, series: [selected] });
   }
@@ -266,6 +284,7 @@ export class NativeSidecarClient implements SidecarClient {
   async buildVolumeCache(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ directory?: string; volumePath?: string; previewPath?: string; sourceHash?: string; dimensions?: { x: number; y: number; z: number }; spacing?: Vec3; origin?: Vec3; directionLps?: number[][] }> {
     await this.ensureSelected(project, onProgress);
     const directory = nativeCacheDirectory(project);
+    if (isTauriRuntime()) await invoke("authorize_path", { path: directory });
     const result = await this.request<Record<string, unknown>>("build_volume_cache", { directory }, onProgress);
     const scientific = result.scientific_source as Record<string, unknown> | undefined;
     const header = scientific?.header as Record<string, unknown> | undefined;
@@ -333,7 +352,6 @@ export class NativeSidecarClient implements SidecarClient {
     const mode = project.selection.kind === "single" ? "single" : project.selection.outputMode === "tiles" || project.selection.kind === "tiles" ? "tile" : "continuous";
     const calibration = project.calibrations.find((profile) => profile.id === project.selection.calibrationId) ?? project.calibrations.find((profile) => profile.accepted);
     const result = await this.request<Record<string, unknown>>("create_print_selection", {
-      ...sourcePayload(project),
       plane: project.selection.orientation,
       mode,
       plane_index: mode === "single" ? project.selection.start : undefined,
@@ -346,11 +364,23 @@ export class NativeSidecarClient implements SidecarClient {
       layer_height_mm: calibration?.layerHeightMm ?? 0.2,
       stride: project.selection.stride,
       resampling: project.selection.resamplingMethod ?? "trilinear",
-      plate_layout: mode === "tile" ? { tile_spacing_mm: [2, 2] } : {},
-      structural_regions: scenePayload(project).regions,
+      labels: project.selection.tileLabels ?? [],
+      plate_layout: mode === "tile" ? {
+        columns: project.selection.tilePlateColumns,
+        rows: project.selection.tilePlateRows,
+        tile_spacing_mm: [2, 2],
+        tile_thickness_mm: project.selection.tileThicknessMm,
+        orientation_markers: project.selection.tileOrientationMarkers ?? true,
+        tabs: project.selection.tileTabs ?? false,
+        tab_width_mm: project.selection.tileTabWidthMm,
+        brim_mm: project.selection.tileBrimMm,
+      } : {},
     }, onProgress);
     const printSize = Array.isArray(result.print_size_mm) ? result.print_size_mm.map(Number) : [];
-    return { selectionId: `native-${String(result.source_hash ?? "selection").slice(0, 12)}`, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: Number(printSize[2] ?? project.selection.thicknessMm), transformHash: `sha256:${String(result.source_hash ?? "unknown")}` };
+    const matrix = Array.isArray(result.source_to_print_transform) ? result.source_to_print_transform.flatMap((row) => Array.isArray(row) ? row.map(Number) : []) : undefined;
+    const selectionId = String(result.selection_id ?? result.selectionId ?? `native-${String(result.source_hash ?? "selection").slice(0, 12)}`);
+    const transformHash = String(result.transform_hash ?? result.transformHash ?? `sha256:${String(result.source_hash ?? "unknown")}`);
+    return { selectionId, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: Number(printSize[2] ?? project.selection.thicknessMm), transformHash, sourceToPrintTransform: matrix };
   }
 
   async validateScene(project: ProjectDocument): Promise<{ valid: boolean; messages: string[] }> {
@@ -360,16 +390,34 @@ export class NativeSidecarClient implements SidecarClient {
 
   async generateToolpath(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ToolpathResult> {
     await this.ensureSelected(project, onProgress);
-    const result = await this.request<{ segment_count?: number; gcode_sha256?: string; clipping_percent?: number; estimated?: ToolpathResult["estimate"] }>("generate_toolpath", {
+    const calibration = project.calibrations.find((profile) => profile.id === project.selection.calibrationId) ?? project.calibrations.find((profile) => profile.accepted);
+    if (!calibration?.accepted) throw new Error("Generation requires one explicitly selected accepted calibration.");
+    const acceptedProfiles = project.calibrations.filter((profile) => profile.accepted);
+    const toolBindings = Object.fromEntries(acceptedProfiles.map((profile) => [profile.tool, profile.id]));
+    const regionOwners = Object.fromEntries(project.scene.filter((object) => object.visible).map((object) => [object.id, { region: object.region, tool: object.tool }]));
+    const result = await this.request<{ segment_count?: number; gcode_sha256?: string; clipping_percent?: number; estimated?: ToolpathResult["estimate"]; report?: { estimated?: { print_time?: string; print_time_seconds?: number; tool_changes?: number; per_tool?: Record<string, { mass_g?: number | null; mass_status?: string }> | undefined; mass_status?: string } } }>("generate_toolpath", {
       calibration: calibrationPayload(project),
       selection: project.selection,
       scene: scenePayload(project),
-      tool: undefined,
+      tool: calibration.tool,
+      tool_bindings: toolBindings,
+      region_owners: regionOwners,
       allow_calibration_clipping: project.toolpath.clippingAcknowledged,
       acknowledge_calibration_clipping: project.toolpath.clippingAcknowledged,
       profile: { printer: project.calibrations.find((profile) => profile.accepted)?.printer ?? "Prusa XL", sample_step_mm: project.source.spacing.x },
     }, onProgress);
-    return { runId: `native-${String(result.gcode_sha256 ?? "run").slice(0, 12)}`, segmentCount: Number(result.segment_count ?? 0), clippingPercent: Number(result.clipping_percent ?? project.toolpath.clippingPercent), estimate: result.estimated ?? project.toolpath.estimated };
+    const estimate = result.estimated ?? result.report?.estimated;
+    if (!estimate) throw new Error("Native sidecar did not return measured run estimates.");
+    const normalizedEstimate: ToolpathResult["estimate"] = "printTime" in estimate
+      ? estimate
+      : {
+        printTime: estimate.print_time ?? (estimate.print_time_seconds !== undefined ? `${Math.round(estimate.print_time_seconds / 60)} min` : "Unavailable"),
+        t0Grams: estimate.per_tool?.T0?.mass_g ?? null,
+        t1Grams: estimate.per_tool?.T1?.mass_g ?? null,
+        toolChanges: Number(estimate.tool_changes ?? 0),
+        massStatus: estimate.mass_status ?? (Object.values(estimate.per_tool ?? {}).map((tool) => tool.mass_status).filter(Boolean).join("; ") || undefined),
+      };
+    return { runId: `native-${String(result.gcode_sha256 ?? "run").slice(0, 12)}`, segmentCount: Number(result.segment_count ?? 0), clippingPercent: Number(result.clipping_percent ?? 0), estimate: normalizedEstimate };
   }
 
   async reverseAuditGcode(project: ProjectDocument): Promise<{ passed: boolean; checks: string[] }> {
@@ -378,8 +426,9 @@ export class NativeSidecarClient implements SidecarClient {
   }
 
   async exportRunPackage(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ExportPackageResult> {
-    const result = await this.request<{ files: string[]; hashes: Record<string, string>; package_name?: string }>("export_run_package", { directory: `${nativeCacheDirectory(project)}/run-package`, run_id: project.toolpath.runId }, onProgress);
-    return { packageName: result.package_name ?? "voxelweave-run-package.zip", exportHash: `sha256:${result.hashes?.["hashes.json"] ?? "unknown"}`, files: result.files ?? [] };
+    const result = await this.request<{ files: string[]; hashes: Record<string, string>; package_name?: string; package_path?: string; directory?: string }>("export_run_package", { directory: `${nativeCacheDirectory(project)}/run-package`, run_id: project.toolpath.runId }, onProgress);
+    if (!result.package_name && !result.package_path && !result.directory) throw new Error("Native sidecar export omitted its exact package identity.");
+    return { packageName: result.package_name ?? result.package_path ?? result.directory ?? "run-package", packageDirectory: result.package_path ?? result.directory, exportHash: `sha256:${result.hashes?.["hashes.json"] ?? "unknown"}`, files: result.files ?? [] };
   }
 
   async verifyScanBack(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VerifyScanBackResult> {
@@ -390,10 +439,11 @@ export class NativeSidecarClient implements SidecarClient {
     return { evidenceName: source.split(/[\\/]/).pop() ?? "scan-back", registrationMethod: project.verify.registrationMethod, confidence: result.registration_confidence >= 0.9 ? "high" : result.registration_confidence >= 0.5 ? "medium" : "low", comparison: { meanAbsoluteHu: result.mae_hu, rmseHu: result.rmse_hu, p95AbsoluteHu: result.p95_abs_hu ?? result.p95_absolute_error_hu, registeredVoxels: result.compared_voxel_count } };
   }
 
-  async exportVerificationReport(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; exportHash: string; files: string[] }> {
+  async exportVerificationReport(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; packageDirectory?: string; exportHash: string; files: string[] }> {
     const directory = `${nativeCacheDirectory(project)}/verification-report`;
-    const result = await this.request<{ files: string[]; hashes: Record<string, string>; report_path?: string; package_name?: string }>("export_run_package", { directory, run_id: project.toolpath.runId, include_verification_report: true, verification: project.verify }, onProgress);
-    return { reportPath: nativeArtifactPath(result.report_path, directory), packageName: result.package_name ?? "voxelweave-verification-report.zip", exportHash: `sha256:${result.hashes?.["hashes.json"] ?? "unknown"}`, files: result.files ?? [] };
+    const result = await this.request<{ files: string[]; hashes: Record<string, string>; report_path?: string; package_name?: string; package_path?: string; directory?: string }>("export_run_package", { directory, run_id: project.toolpath.runId, include_verification_report: true, verification: project.verify }, onProgress);
+    if (!result.package_name && !result.package_path && !result.directory) throw new Error("Native sidecar verification export omitted its exact package identity.");
+    return { reportPath: nativeArtifactPath(result.report_path, directory), packageName: result.package_name ?? result.package_path ?? result.directory ?? "verification-report", packageDirectory: result.package_path ?? result.directory, exportHash: `sha256:${result.hashes?.["hashes.json"] ?? "unknown"}`, files: result.files ?? [] };
   }
 
   async cancel(requestId: string): Promise<void> {
@@ -408,24 +458,24 @@ export class DeterministicSidecarClient implements SidecarClient {
 
   async inspectDicomSource(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomInspectionResult> {
     emitProgress("inspect_dicom_source", onProgress, [["Read series metadata", 0.4], ["Validate physical coordinates", 1]]);
-    return { source: project.source, candidates: project.source.seriesCandidates, warnings: [] };
+    return { source: project.source, candidates: project.source.seriesCandidates ?? [], warnings: [] };
   }
   async selectDicomSeries(project: ProjectDocument, _seriesUid?: string, onProgress?: (event: ProgressEvent) => void): Promise<DicomInspectionResult> {
     emitProgress("select_dicom_series", onProgress, [["Group SeriesInstanceUID", 0.4], ["Sort by ImagePositionPatient", 1]]);
-    return { source: project.source, candidates: project.source.seriesCandidates, warnings: [] };
+    return { source: project.source, candidates: project.source.seriesCandidates ?? [], warnings: [] };
   }
   async buildVolumeCache(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ directory?: string; volumePath?: string; previewPath?: string }> { emitProgress("build_volume_cache", onProgress, [["Decode signed HU planes", 0.25], ["Build preview pyramid", 0.7], ["Cache ready", 1]]); return { directory: project.source.cache.directory }; }
   async requestMprPlane(project: ProjectDocument, orientation = project.selection.orientation, onProgress?: (event: ProgressEvent) => void): Promise<MprPlaneResult> { emitProgress("request_mpr_plane", onProgress, [["Read cached plane", 1]]); return { plane: orientation, source: project.source.cache.scientificSource, shapeYx: [orientation === "axial" ? project.source.dimensions.y : project.source.dimensions.z, orientation === "coronal" ? project.source.dimensions.x : project.source.dimensions.y] }; }
   async requestVolumePreview(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VolumePreviewResult> { emitProgress("request_volume_preview", onProgress, [["Refine preview volume", 1]]); return { resolution: project.source.cache.preview, source: "preview texture only", shapeZyx: [64, 64, 64] }; }
   async sampleVoxel(_project: ProjectDocument, coordinate: { x: number; y: number; z: number }): Promise<{ hu: number; coordinate: typeof coordinate }> { return { hu: Math.round(-782 + coordinate.x * 0.4 + coordinate.y * 0.18 + coordinate.z * 0.6), coordinate }; }
   async calculateHistogram(project: ProjectDocument): Promise<{ bins: number[]; source: string }> { return { bins: [-990, -820, -740, -410, 30, 1200], source: project.source.cache.scientificSource }; }
-  async createPrintSelection(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomSelectionResult> { emitProgress("create_print_selection", onProgress, [["Lock physical crop", 0.35], ["Build source-to-print transform", 1]]); return { selectionId: `${project.projectId}-selection-001`, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: project.selection.thicknessMm, transformHash: "sha256:test-selection" }; }
+  async createPrintSelection(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomSelectionResult> { emitProgress("create_print_selection", onProgress, [["Lock physical crop", 0.35], ["Build source-to-print transform", 1]]); return { selectionId: `${project.projectId}-selection-001`, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: project.selection.thicknessMm, transformHash: "sha256:test-selection", sourceToPrintTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }; }
   async validateScene(project: ProjectDocument): Promise<{ valid: boolean; messages: string[] }> { return { valid: project.scene.some((object) => object.visible), messages: ["Controlled test adapter scene validation", "Tool ownership resolved"] }; }
   async generateToolpath(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ToolpathResult> { emitProgress("generate_toolpath", onProgress, [["Sample calibrated rail field", 0.3], ["Emit alternating roads", 0.72], ["Preview ready", 1]]); return { runId: "run-test-adapter", segmentCount: 18432, clippingPercent: project.toolpath.clippingPercent, estimate: project.toolpath.estimated }; }
   async reverseAuditGcode(project: ProjectDocument): Promise<{ passed: boolean; checks: string[] }> { return { passed: project.toolpath.clippingAcknowledged, checks: ["Controlled adapter coordinates match", "Tools and feedrates match", "Bounds match"] }; }
-  async exportRunPackage(_project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ExportPackageResult> { emitProgress("export_run_package", onProgress, [["Write G-code and manifests", 0.45], ["Hash run artifacts", 0.8], ["Package ready", 1]]); return { packageName: "lung-phantom-study_run-vw-demo-0001.zip", exportHash: "sha256:test-package", files: ["run.gcode", "run-report.json", "toolpath-trace.json", "dicom-selection.json", "transform.json"] }; }
+  async exportRunPackage(_project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ExportPackageResult> { emitProgress("export_run_package", onProgress, [["Write G-code and manifests", 0.45], ["Hash run artifacts", 0.8], ["Package ready", 1]]); return { packageName: "lung-phantom-study_run-vw-demo-0001.zip", packageDirectory: "synthetic://run-package", exportHash: "sha256:test-package", files: ["toolpath.gcode", "toolpath_preview.bin", "toolpath_trace.bin", "selection_manifest.json", "source_to_print_transform.json", "run_report.json", "hashes.json"] }; }
   async verifyScanBack(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VerifyScanBackResult> { emitProgress("verify_scan_back", onProgress, [["Register scan-back evidence", 0.55], ["Compare signed HU samples", 1]]); return { evidenceName: project.verify.sourcePath?.split(/[\\/]/).pop() ?? "scan-back_lung-phantom_2026-08-04.tiff", registrationMethod: "landmark rigid", confidence: "high", comparison: { meanAbsoluteHu: 38, rmseHu: 64, p95AbsoluteHu: 112, registeredVoxels: 482_104 } }; }
-  async exportVerificationReport(_project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; exportHash: string; files: string[] }> { emitProgress("export_run_package", onProgress, [["Write verification report", 0.5], ["Hash report artifacts", 1]]); return { packageName: "test-adapter-verification-report.zip", exportHash: "sha256:test-report", files: ["verification-report.json", "provenance.json"] }; }
+  async exportVerificationReport(_project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; packageDirectory?: string; exportHash: string; files: string[] }> { emitProgress("export_run_package", onProgress, [["Write verification report", 0.5], ["Hash report artifacts", 1]]); return { packageName: "test-adapter-verification-report", packageDirectory: "synthetic://verification-report", exportHash: "sha256:test-report", files: ["verification-report.json", "provenance.json"] }; }
   async cancel(_requestId: string): Promise<void> { /* synchronous adapter */ }
 }
 

@@ -15,6 +15,10 @@ describe("native sidecar bridge", () => {
       if (operation === "inspect_dicom_source") return { ok: true, payload: { source_label: "selected CT", series: [{ series_uid: "series-local", modality: "CT", instance_count: 12, eligible: true }] } };
       if (operation === "select_dicom_series") return { ok: true, payload: { series_uid: "series-local", modality: "CT", instance_count: 12, eligible: true } };
       if (operation === "request_mpr_plane") return { ok: true, payload: { plane: { plane: "axial", shape_yx: [4, 4], coordinate_mm: 1, source_hash: "hash" }, artifact: { path: "mpr.bin" } } };
+      if (operation === "generate_toolpath") return { ok: true, payload: { segment_count: 2, gcode_sha256: "abc", clipping_percent: 0, estimated: { printTime: "1 min", t0Grams: 1, t1Grams: 0, toolChanges: 0 } } };
+      if (operation === "create_print_selection") return { ok: true, payload: { selection_id: "native-selection-1", print_size_mm: [8, 8, 2], source_to_print_transform: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], transform_hash: "sha256:transform" } };
+      if (operation === "validate_scene") return { ok: true, payload: { passed: true, errors: [], warnings: [] } };
+      if (operation === "export_run_package") return { ok: true, payload: { package_name: "run-package-1", package_path: "/Users/test/CT/.voxelweave-cache/run-package-1", files: ["toolpath.gcode", "hashes.json"], hashes: { "hashes.json": "hashes" } } };
       return { ok: true, payload: {} };
     });
   });
@@ -41,5 +45,30 @@ describe("native sidecar bridge", () => {
     project.source = { ...project.source, path: undefined };
     await expect(new NativeSidecarClient().requestVolumePreview(project)).rejects.toThrow(/Choose a local DICOM folder/);
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("emits exact physical selection, canonical scene, calibration, and export contracts", async () => {
+    const project = structuredClone(syntheticProjectDocument);
+    project.source = { ...project.source, path: "/Users/test/CT", seriesUid: "series-local", sliceCount: 12 };
+    project.selection = { ...project.selection, start: 2, end: 8, tileLabels: ["A", "B"], tilePlateColumns: 2, tilePlateRows: 1, tileThicknessMm: 0.4 };
+    project.scene = [...project.scene, { id: "mesh-1", name: "Imported mesh", kind: "fixture", region: "measurement", tool: "T1", transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 2, y: 2, z: 2 } }, dimensionsMm: { x: 2, y: 2, z: 2 }, vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces: [[0, 1, 2]], visible: true }];
+    const client = new NativeSidecarClient();
+    const selection = await client.createPrintSelection(project);
+    expect(selection.selectionId).toBe("native-selection-1");
+    const requests = invoke.mock.calls.map((call) => call[1]?.request).filter(Boolean) as Array<{ operation: string; payload: Record<string, unknown> }>;
+    const created = requests.find((request) => request.operation === "create_print_selection");
+    expect(created?.payload).toMatchObject({ plane: "axial", start_index: 2, end_index: 8, labels: ["A", "B"] });
+    expect(created?.payload).not.toHaveProperty("source");
+    expect(created?.payload).not.toHaveProperty("structural_regions");
+    const validated = await client.validateScene(project);
+    expect(validated.valid).toBe(true);
+    const sceneRequest = (invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "validate_scene") as { payload: { scene: { regions: Array<{ geometry: { dimensions: { x: number; y: number; z: number }; vertices?: number[][]; faces?: number[][] } }> } } });
+    expect(sceneRequest.payload.scene.regions.find((region) => region.geometry.vertices)?.geometry).toMatchObject({ vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces: [[0, 1, 2]] });
+    await client.generateToolpath(project);
+    const generation = invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "generate_toolpath") as { payload: { tool: string; calibration: Array<{ binding: { pitch_mm: number; layer_height_mm: number; flow_mm3_s: number } }> } };
+    expect(generation.payload.tool).toBe("T0");
+    expect(generation.payload.calibration[0].binding).toMatchObject({ pitch_mm: 0.4, layer_height_mm: 0.2, flow_mm3_s: 1.2 });
+    const exported = await client.exportRunPackage(project);
+    expect(exported).toMatchObject({ packageName: "run-package-1", packageDirectory: "/Users/test/CT/.voxelweave-cache/run-package-1", files: ["toolpath.gcode", "hashes.json"] });
   });
 });

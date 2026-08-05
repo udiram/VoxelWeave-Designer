@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { unzipSync } from "fflate";
 import { useProject } from "../../state/ProjectContext";
 import { Button, Disclosure, FieldRow, IconButton, SelectField, SectionHeading, StatusBadge } from "../../components/ui";
 import { Icon } from "../../components/icons";
@@ -9,6 +11,55 @@ import type { SceneObject } from "../../types";
 import { authorizeNativePath, isNativeRuntime } from "../../services/projectDocument";
 
 const axes = ["x", "y", "z"] as const;
+
+type SolidMesh = { vertices: number[][]; faces: number[][]; dimensionsMm: { x: number; y: number; z: number } };
+
+function meshDimensions(vertices: number[][]) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  vertices.forEach((vertex) => vertex.forEach((value, axis) => { min[axis] = Math.min(min[axis], value); max[axis] = Math.max(max[axis], value); }));
+  return { x: Math.max(0.001, max[0] - min[0]), y: Math.max(0.001, max[1] - min[1]), z: Math.max(0.001, max[2] - min[2]) };
+}
+
+function parseStl(bytes: Uint8Array): SolidMesh {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const binaryCount = bytes.byteLength >= 84 ? view.getUint32(80, true) : 0;
+  const isBinary = bytes.byteLength >= 84 && 84 + binaryCount * 50 <= bytes.byteLength;
+  const vertices: number[][] = [];
+  const faces: number[][] = [];
+  const indexFor = new Map<string, number>();
+  const add = (vertex: number[]) => { const key = vertex.map((value) => value.toPrecision(12)).join(","); const existing = indexFor.get(key); if (existing !== undefined) return existing; const index = vertices.length; vertices.push(vertex); indexFor.set(key, index); return index; };
+  if (isBinary) {
+    for (let triangle = 0; triangle < binaryCount; triangle += 1) {
+      const offset = 84 + triangle * 50 + 12;
+      const face = [0, 1, 2].map((index) => add([view.getFloat32(offset + index * 12, true), view.getFloat32(offset + index * 12 + 4, true), view.getFloat32(offset + index * 12 + 8, true)]));
+      faces.push(face);
+    }
+  } else {
+    const text = new TextDecoder().decode(bytes);
+    const matches = [...text.matchAll(/vertex\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)/g)];
+    for (let index = 0; index + 2 < matches.length; index += 3) faces.push([0, 1, 2].map((vertex) => add(matches[index + vertex].slice(1, 4).map(Number))));
+  }
+  if (!vertices.length || !faces.length) throw new Error("STL did not contain a triangular mesh");
+  return { vertices, faces, dimensionsMm: meshDimensions(vertices) };
+}
+
+function parse3mf(bytes: Uint8Array): SolidMesh {
+  const files = unzipSync(bytes);
+  const modelName = Object.keys(files).find((name) => /(^|\/)3dmodel\.model$/i.test(name));
+  if (!modelName) throw new Error("3MF archive does not contain 3D/3dmodel.model");
+  const xml = new DOMParser().parseFromString(new TextDecoder().decode(files[modelName]), "application/xml");
+  const vertices = [...xml.querySelectorAll("vertices > vertex")].map((node) => [Number(node.getAttribute("x")), Number(node.getAttribute("y")), Number(node.getAttribute("z"))]);
+  const faces = [...xml.querySelectorAll("triangles > triangle")].map((node) => [Number(node.getAttribute("v1")), Number(node.getAttribute("v2")), Number(node.getAttribute("v3"))]);
+  if (!vertices.length || !faces.length || vertices.some((vertex) => vertex.some((value) => !Number.isFinite(value)))) throw new Error("3MF model did not contain finite vertices and triangles");
+  return { vertices, faces, dimensionsMm: meshDimensions(vertices) };
+}
+
+async function readSolid(path: string, format: "stl" | "3mf"): Promise<SolidMesh> {
+  const raw = await invoke<number[] | Uint8Array>("read_authorized_binary_file", { path });
+  const bytes = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
+  return format === "3mf" ? parse3mf(bytes) : parseStl(bytes);
+}
 
 export function DesignWorkspace() {
   const { state, dispatch, sidecar } = useProject();
@@ -24,8 +75,9 @@ export function DesignWorkspace() {
       if (typeof selectedPath !== "string") return;
       await authorizeNativePath(selectedPath);
       const format = selectedPath.toLowerCase().endsWith(".3mf") ? "3mf" : "stl";
-      dispatch({ type: "IMPORT_SOLID", path: selectedPath, format });
-      const validation = await sidecar.validateScene({ ...state, scene: [...state.scene, { id: "import-pending", name: "Imported solid", kind: "fixture", region: "fixture", tool: "T1", sourcePath: selectedPath, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } }, visible: true }] });
+      const mesh = await readSolid(selectedPath, format);
+      dispatch({ type: "SET_IMPORTED_SOLID", path: selectedPath, format, ...mesh });
+      const validation = await sidecar.validateScene({ ...state, scene: [...state.scene, { id: "import-pending", name: "Imported solid", kind: "fixture", region: "fixture", tool: "T1", sourcePath: selectedPath, dimensionsMm: mesh.dimensionsMm, vertices: mesh.vertices, faces: mesh.faces, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: mesh.dimensionsMm }, visible: true }] });
       dispatch({ type: "SET_TOAST", message: validation.valid ? `Validated ${format.toUpperCase()} import` : validation.messages.join(" · ") });
     } catch (error) { dispatch({ type: "SET_TOAST", message: error instanceof Error ? error.message : "Solid import failed" }); }
   };

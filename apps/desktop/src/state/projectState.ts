@@ -10,7 +10,9 @@ export function validateCalibrationProfile(profile: CalibrationProfile): string[
   });
   if (profile.tool !== "T0" && profile.tool !== "T1") errors.push("tool binding is invalid");
   if (!Number.isFinite(profile.nozzleMm) || profile.nozzleMm <= 0) errors.push("nozzle must be greater than 0 mm");
+  if (!Number.isFinite(profile.pitchMm) || (profile.pitchMm ?? 0) <= 0) errors.push("pitch must be greater than 0 mm and independently bound");
   if (!Number.isFinite(profile.layerHeightMm) || profile.layerHeightMm <= 0) errors.push("layer height must be greater than 0 mm");
+  if (!Number.isFinite(profile.flowMm3S) || (profile.flowMm3S ?? 0) <= 0) errors.push("flow must be greater than 0 mm³/s and evidence-bound");
   const [minimum, maximum] = profile.widthRange;
   if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum < 0 || maximum <= minimum) errors.push("width range must be finite and increasing");
   if (profile.huSamples.length < 2) errors.push("at least two HU samples are required");
@@ -100,11 +102,7 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const end = Math.min(state.selection.end, max);
       const start = Math.min(state.selection.start, end);
       const spacing = state.selection.orientation === "axial" ? source.spacing.z : state.selection.orientation === "sagittal" ? source.spacing.x : source.spacing.y;
-      const physicalBounds = {
-        x: [source.origin.x, source.origin.x + Math.max(0, source.dimensions.x - 1) * source.spacing.x] as [number, number],
-        y: [source.origin.y, source.origin.y + Math.max(0, source.dimensions.y - 1) * source.spacing.y] as [number, number],
-        z: [source.origin.z, source.origin.z + Math.max(0, source.dimensions.z - 1) * source.spacing.z] as [number, number],
-      };
+      const physicalBounds = sourcePhysicalBounds(source);
       const hasDicomObject = state.scene.some((object) => object.kind === "dicom" && object.sourcePath === source.path);
       const scene = hasDicomObject || !source.path ? state.scene : [...state.scene, {
         id: "scene-dicom-source",
@@ -138,6 +136,19 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         ...state,
         selection: { ...state.selection, created: true },
         ui: { ...state.ui, toast: "Print selection created from physical coordinates" },
+      };
+    case "SET_SELECTION_RESULT":
+      return {
+        ...state,
+        selection: {
+          ...state.selection,
+          created: true,
+          selectionId: action.result.selectionId,
+          transformHash: action.result.transformHash,
+          sourceToPrintTransform: action.result.sourceToPrintTransform ?? state.selection.sourceToPrintTransform,
+          outputDimensionsMm: state.selection.outputDimensionsMm,
+        },
+        ui: { ...state.ui, toast: `Print selection created · ${action.result.selectionId}` },
       };
     case "UPSERT_CALIBRATION_PROFILE": {
       const profile = profileWithValidation(action.profile, false);
@@ -202,7 +213,7 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       if (!state.toolpath.audited) return state;
       return {
         ...state,
-        send: { ...state.send, packageExported: true, packageName: action.packageName ?? "voxelweave-run-package.zip", exportHash: action.exportHash ?? "sha256:unknown" },
+        send: { ...state.send, packageExported: true, packageName: action.packageName ?? "run-package", packageDirectory: action.packageDirectory, files: action.files, exportHash: action.exportHash ?? "sha256:unknown" },
         ui: { ...state.ui, workspace: "send", toast: "Run package exported locally; automatic print start remains unavailable" },
       };
     case "IMPORT_SCAN_BACK":
@@ -287,6 +298,11 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const number = state.scene.filter((object) => object.sourcePath).length + 1;
       const id = `scene-import-${number}`;
       return { ...state, scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} · validate before generation` } };
+    }
+    case "SET_IMPORTED_SOLID": {
+      const number = state.scene.filter((object) => object.sourcePath).length + 1;
+      const id = `scene-import-${number}`;
+      return { ...state, scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, sourceDimensionsMm: action.dimensionsMm, vertices: action.vertices, faces: action.faces, dimensionsMm: action.dimensionsMm, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: action.dimensionsMm }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} mesh · ${action.vertices.length} vertices · validate before generation` } };
     }
     case "SET_TOAST":
       return { ...state, ui: { ...state.ui, toast: action.message } };

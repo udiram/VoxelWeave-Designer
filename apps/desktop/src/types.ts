@@ -32,6 +32,11 @@ export interface SceneObject {
   dimensionsMm?: Vec3;
   polygonSides?: number;
   polygonPoints?: Array<{ x: number; y: number }>;
+  /** Canonical imported mesh payload. Coordinates are millimetres in scene space. */
+  vertices?: number[][];
+  faces?: number[][];
+  /** Source mesh dimensions are kept separately from transform scale. */
+  sourceDimensionsMm?: Vec3;
   boolean?: { operation: "union" | "subtract" | "intersect"; operands: string[] };
   sourcePath?: string;
   visible: boolean;
@@ -43,6 +48,8 @@ export interface DicomSource {
   modality: "CT";
   /** Absolute path selected by the user. Raw DICOM is never persisted in the document. */
   path?: string;
+  /** One or more native inputs selected together (folder, archive, or file group). */
+  inputPaths?: string[];
   /** Hash of the selected source metadata/files, supplied by the sidecar. */
   sourceHash?: string;
   seriesCandidates?: DicomSeriesCandidate[];
@@ -97,6 +104,15 @@ export interface PrintSelection {
   sourceToPrintTransform?: number[];
   resamplingMethod?: "trilinear" | "nearest";
   calibrationId?: string;
+  selectionId?: string;
+  transformHash?: string;
+  tileLabels?: string[];
+  tilePlateColumns?: number;
+  tilePlateRows?: number;
+  tileOrientationMarkers?: boolean;
+  tileTabs?: boolean;
+  tileTabWidthMm?: number;
+  tileBrimMm?: number;
   created: boolean;
 }
 
@@ -110,7 +126,12 @@ export interface CalibrationProfile {
   scanner: string;
   reconstruction: string;
   nozzleMm: number;
+  /** Rail pitch is independent from layer height and must be bound to evidence. */
+  pitchMm?: number;
   layerHeightMm: number;
+  flowMm3S?: number;
+  huUncertainty?: number[];
+  evidenceReference?: string;
   accepted: boolean;
   widthRange: [number, number];
   huSamples: Array<{ widthMm: number; measuredHu: number; targetHu: number }>;
@@ -127,9 +148,10 @@ export interface ToolpathState {
   runId?: string;
   estimated: {
     printTime: string;
-    t0Grams: number;
-    t1Grams: number;
+    t0Grams: number | null;
+    t1Grams: number | null;
     toolChanges: number;
+    massStatus?: string;
   };
 }
 
@@ -137,6 +159,8 @@ export interface SendState {
   packageExported: boolean;
   packageName?: string;
   exportHash?: string;
+  packageDirectory?: string;
+  files?: string[];
   connection: "local only" | "Prusa XL ready";
   printStarted: false;
 }
@@ -195,6 +219,7 @@ export type ProjectAction =
   | { type: "SET_SELECTION"; patch: Partial<PrintSelection> }
   | { type: "SET_DICOM_SOURCE"; source: DicomSource }
   | { type: "CREATE_PRINT_SELECTION" }
+  | { type: "SET_SELECTION_RESULT"; result: DicomSelectionResult }
   | { type: "UPSERT_CALIBRATION_PROFILE"; profile: CalibrationProfile }
   | { type: "UPDATE_CALIBRATION_PROFILE"; id: string; patch: Partial<CalibrationProfile> }
   | { type: "ACCEPT_CALIBRATION_PROFILE"; id: string }
@@ -204,7 +229,7 @@ export type ProjectAction =
   | { type: "SET_TOOLPATH_GENERATED"; runId: string; estimate: ToolpathState["estimated"]; clippingPercent?: number }
   | { type: "SET_LAYER"; layer: number }
   | { type: "GENERATE_AUDITED_GCODE" }
-  | { type: "EXPORT_RUN_PACKAGE"; packageName?: string; exportHash?: string }
+  | { type: "EXPORT_RUN_PACKAGE"; packageName?: string; exportHash?: string; packageDirectory?: string; files?: string[] }
   | { type: "IMPORT_SCAN_BACK"; sourcePath?: string; evidenceName?: string; result?: VerifyScanBackResult }
   | { type: "SET_COMPARISON_MODE"; mode: ComparisonMode }
   | { type: "SET_REGISTRATION"; method: VerifyState["registrationMethod"]; confidence: VerifyState["confidence"] }
@@ -217,6 +242,7 @@ export type ProjectAction =
   | { type: "ADD_PRIMITIVE"; kind: SceneObject["kind"] }
   | { type: "BOOLEAN_SCENE"; operation: "union" | "subtract" | "intersect"; operandIds: string[] }
   | { type: "IMPORT_SOLID"; path: string; format: "stl" | "3mf" }
+  | { type: "SET_IMPORTED_SOLID"; path: string; format: "stl" | "3mf"; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3 }
   | { type: "SET_TOAST"; message: string }
   | { type: "CLEAR_TOAST" };
 
@@ -231,6 +257,7 @@ export interface DicomSelectionResult {
   sourceResolution: string;
   physicalThicknessMm: number;
   transformHash: string;
+  sourceToPrintTransform?: number[];
 }
 
 export interface ToolpathResult {
@@ -244,6 +271,7 @@ export interface ExportPackageResult {
   packageName: string;
   exportHash: string;
   files: string[];
+  packageDirectory?: string;
 }
 
 export interface VerifyScanBackResult {

@@ -21,7 +21,11 @@ function emptyCalibration(tool: ToolId, id = `cal-${tool.toLowerCase()}-${Date.n
     scanner: "",
     reconstruction: "",
     nozzleMm: 0,
+    pitchMm: 0,
     layerHeightMm: 0,
+    flowMm3S: 0,
+    huUncertainty: [],
+    evidenceReference: "",
     accepted: false,
     widthRange: [0, 0],
     huSamples: [],
@@ -105,7 +109,7 @@ export function CalibrateWorkspace() {
       <div className="inspector-title"><div><span className="workspace-kicker">BOUND PROTOCOL</span><h2>{profile ? `${profile.tool} profile` : "No profile"}</h2></div><IconButton label="Profile options" icon="more" size={17} onClick={() => dispatch({ type: "SET_TOAST", message: "Profile options are local to this project" })} /></div>
       {profile ? <>
         <div className="inspector-section"><h3>Identity</h3><TextField label="Profile name" value={profile.name} placeholder="e.g. T0 Natural PLA / 0.25 mm" onChange={(event) => updateProfile({ name: event.target.value })} /><TextField label="Material" value={profile.material} placeholder="Material and blend" onChange={(event) => updateProfile({ material: event.target.value })} /><TextField label="Lot" value={profile.lot} placeholder="Lot or batch identifier" onChange={(event) => updateProfile({ lot: event.target.value })} /><TextField label="Printer" value={profile.printer} placeholder="Printer identity" onChange={(event) => updateProfile({ printer: event.target.value })} /><TextField label="Scanner" value={profile.scanner} placeholder="Scanner identity" onChange={(event) => updateProfile({ scanner: event.target.value })} /><TextField label="Reconstruction" value={profile.reconstruction} placeholder="Reconstruction kernel / protocol" onChange={(event) => updateProfile({ reconstruction: event.target.value })} /></div>
-        <Disclosure title="Acceptance boundary" open={evidenceOpen} onToggle={() => setEvidenceOpen((open) => !open)}><div className="boundary-readout"><NumberField label="Nozzle" value={profile.nozzleMm} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ nozzleMm: value })} /><NumberField label="Layer height" value={profile.layerHeightMm} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ layerHeightMm: value })} /><NumberField label="Minimum width" value={profile.widthRange[0]} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ widthRange: [value, profile.widthRange[1]] })} /><NumberField label="Maximum width" value={profile.widthRange[1]} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ widthRange: [profile.widthRange[0], value] })} /></div></Disclosure>
+        <Disclosure title="Acceptance boundary" open={evidenceOpen} onToggle={() => setEvidenceOpen((open) => !open)}><div className="boundary-readout"><NumberField label="Nozzle" value={profile.nozzleMm} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ nozzleMm: value })} /><NumberField label="Rail pitch" value={profile.pitchMm ?? 0} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ pitchMm: value })} /><NumberField label="Layer height" value={profile.layerHeightMm} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ layerHeightMm: value })} /><NumberField label="Flow" value={profile.flowMm3S ?? 0} suffix="mm³/s" min={0} step={0.01} onChange={(value) => updateProfile({ flowMm3S: value })} /><NumberField label="Minimum width" value={profile.widthRange[0]} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ widthRange: [value, profile.widthRange[1]] })} /><NumberField label="Maximum width" value={profile.widthRange[1]} suffix="mm" min={0} step={0.01} onChange={(value) => updateProfile({ widthRange: [profile.widthRange[0], value] })} /></div></Disclosure>
         {acceptanceNotice}
       </> : <Notice tone="info" title="No calibration selected"><span>Create or import a profile to edit identity, acceptance bounds, and HU samples.</span></Notice>}
       <div className="inspector-note"><Icon name="warning" size={15} /><span>Out-of-range commanded widths fail closed. Silent extrapolation is not permitted.</span></div>

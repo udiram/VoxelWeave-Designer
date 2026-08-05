@@ -67,6 +67,11 @@ fn authorized_path(manager: &SidecarManager, requested: &str, allow_missing_targ
     if guard.iter().any(|root| canonical == *root || canonical.starts_with(root)) {
         return Ok(canonical);
     }
+    drop(guard);
+    let cache_guard = manager.cache_paths.lock().map_err(|_| "cache path state is poisoned".to_string())?;
+    if cache_guard.iter().any(|root| canonical == *root || canonical.starts_with(root)) {
+        return Ok(canonical);
+    }
     Err(format!("path is outside the user-authorized scope: {}", raw.display()))
 }
 
@@ -183,6 +188,18 @@ fn authorize_payload_paths(manager: &SidecarManager, value: &Value, location: &s
     match value {
         Value::Object(map) => {
             for (key, child) in map {
+                if key == "sources" {
+                    if let Value::Array(paths) = child {
+                        for (index, value) in paths.iter().enumerate() {
+                            if let Some(path) = value.as_str() {
+                                if path.starts_with("synthetic://") {
+                                    return Err("native sidecar rejects synthetic sources; choose a local path".to_string());
+                                }
+                                authorized_path(manager, path, false).map_err(|error| format!("{location}.sources[{index}]: {error}"))?;
+                            }
+                        }
+                    }
+                }
                 if let Some(path) = child.as_str() {
                     if matches!(key.as_str(), "source" | "scan_back_source" | "source_path" | "sourcePath" | "directory" | "output_path") {
                         if path.starts_with("synthetic://") {
@@ -492,6 +509,18 @@ fn read_authorized_text_file(state: State<'_, SidecarManager>, path: String) -> 
         .map_err(|error| format!("cannot read {}: {error}", target.display()))
 }
 
+#[tauri::command]
+fn read_authorized_binary_file(state: State<'_, SidecarManager>, path: String) -> Result<Vec<u8>, String> {
+    let target = authorized_path(&state, &path, false)?;
+    let metadata = std::fs::metadata(&target)
+        .map_err(|error| format!("cannot inspect {}: {error}", target.display()))?;
+    if metadata.len() as usize > MAX_DOCUMENT_BYTES * 64 {
+        return Err("binary artifact exceeds the bounded 256 MiB read limit".to_string());
+    }
+    std::fs::read(&target)
+        .map_err(|error| format!("cannot read {}: {error}", target.display()))
+}
+
 fn shutdown_sidecar_process(state: &SidecarManager) -> Result<(), String> {
     let mut process = state
         .process
@@ -524,14 +553,14 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(SidecarManager::default())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             sidecar_request,
             sidecar_shutdown,
             authorize_path,
             save_voxelweave_document,
             open_voxelweave_document,
-            read_authorized_text_file
+            read_authorized_text_file,
+            read_authorized_binary_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoxelWeave Designer");

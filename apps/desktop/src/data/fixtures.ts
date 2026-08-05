@@ -79,7 +79,11 @@ export const syntheticCalibrations: CalibrationProfile[] = [
     scanner: "GE Revolution CT · synthetic",
     reconstruction: "STANDARD / BONE",
     nozzleMm: 0.25,
+    pitchMm: 0.4,
     layerHeightMm: 0.2,
+    flowMm3S: 1.2,
+    huUncertainty: [8, 7, 6, 7],
+    evidenceReference: "fixture://calibration/t0-natural",
     accepted: true,
     widthRange: [0.48, 1.05],
     huSamples: [
@@ -99,7 +103,11 @@ export const syntheticCalibrations: CalibrationProfile[] = [
     scanner: "GE Revolution CT · synthetic",
     reconstruction: "STANDARD / BONE",
     nozzleMm: 0.4,
+    pitchMm: 0.5,
     layerHeightMm: 0.2,
+    flowMm3S: 1.35,
+    huUncertainty: [10, 11, 9, 12],
+    evidenceReference: "fixture://calibration/t1-white",
     accepted: true,
     widthRange: [0.62, 1.2],
     huSamples: [

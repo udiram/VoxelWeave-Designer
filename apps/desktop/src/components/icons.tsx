@@ -9,7 +9,7 @@ export type IconName =
   | "fit" | "lock" | "download" | "upload" | "file" | "scan" | "ruler"
   | "move" | "rotate" | "scale" | "union" | "subtract" | "intersect"
   | "refresh" | "search" | "checkCircle" | "arrowUpRight" | "external"
-  | "grid" | "probe" | "target" | "menu" | "sliders" | "help";
+  | "grid" | "probe" | "target" | "menu" | "sliders" | "contrast" | "help";
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -86,7 +86,8 @@ export function Icon({ name, size = 18, ...props }: IconProps) {
     case "probe": return <svg {...common}><circle cx="12" cy="12" r="4"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>;
     case "target": return <svg {...common}><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3"/><path d="M12 3.5V2M20.5 12H22M12 20.5V22M3.5 12H2"/></svg>;
     case "menu": return <svg {...common}><path d="M4 6h16M4 12h16M4 18h16"/></svg>;
-    case "sliders": return <svg {...common}><path d="M4 6h5M13 6h7M4 12h9M17 12h3M4 18h2M10 18h10"/><circle cx="11" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>;
+    case "sliders":
+    case "contrast": return <svg {...common}><path d="M4 6h5M13 6h7M4 12h9M17 12h3M4 18h2M10 18h10"/><circle cx="11" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>;
     case "help": return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.6 2.6 0 1 1 4.6 1.7c-1 1.1-2.2 1.4-2.2 3M12 17v.2"/></svg>;
   }
 }

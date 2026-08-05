@@ -1,12 +1,19 @@
-import { useEffect, useRef, useState } from "react";
-import { readFile } from "@tauri-apps/plugin-fs";
-import type { Orientation, SceneObject, ToolId } from "../types";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { Canvas } from "@react-three/fiber";
+import { OrbitControls, Html, Line, PerspectiveCamera } from "@react-three/drei";
+import * as THREE from "three";
+import type { CropBounds, Orientation, SceneObject, ToolId } from "../types";
 import { Icon } from "./icons";
 import type { MprPlaneResult, VolumePreviewResult } from "../services/sidecarClient";
 
 const orange = "#b94c23";
 const teal = "#18818a";
 const ink = "#d7dadd";
+
+function isDomTestRuntime(): boolean {
+  return typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent);
+}
 
 export function SyntheticSlice({ plane, index = 42, onSelect, selected = false }: { plane: Orientation; index?: number; onSelect?: () => void; selected?: boolean }) {
   const labels = plane === "axial" ? { top: "A", bottom: "P", left: "R", right: "L", position: `z: ${(index - 80).toFixed(2)} mm` } : plane === "sagittal" ? { top: "S", bottom: "I", left: "A", right: "P", position: `x: ${(index / 2.1).toFixed(2)} mm` } : { top: "S", bottom: "I", left: "R", right: "L", position: `y: ${(index / -2.1).toFixed(2)} mm` };
@@ -42,7 +49,8 @@ function windowLevel(value: number, windowWidth: number, windowCenter: number): 
 }
 
 async function readBinaryArtifact(path: string): Promise<{ values: Float32Array; shape: number[] }> {
-  const bytes = await readFile(path);
+  const raw = await invoke<number[] | Uint8Array>("read_authorized_binary_file", { path });
+  const bytes = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
   if (bytes.length < 10 || String.fromCharCode(...bytes.slice(0, 6)) !== "VWBF\x01\x00") throw new Error("Unsupported VoxelWeave binary artifact");
   const headerLength = new DataView(bytes.buffer, bytes.byteOffset + 6, 4).getUint32(0, false);
   const header = JSON.parse(new TextDecoder().decode(bytes.slice(10, 10 + headerLength))) as { shape: number[]; dtype: string };
@@ -51,20 +59,35 @@ async function readBinaryArtifact(path: string): Promise<{ values: Float32Array;
   return { values: new Float32Array(payload.buffer, payload.byteOffset, Math.floor(payload.byteLength / 4)), shape: header.shape };
 }
 
-export function InteractiveMprPane({ plane, result, selected = false, index, windowWidth = 1600, windowCenter = -600, onSelect, onCrosshair, testAdapter = false }: { plane: Orientation; result?: MprPlaneResult; selected?: boolean; index: number; windowWidth?: number; windowCenter?: number; onSelect?: () => void; onCrosshair?: (x: number, y: number) => void; testAdapter?: boolean }) {
+export function InteractiveMprPane({ plane, result, selected = false, index, windowWidth = 1600, windowCenter = -600, crosshair: linkedCrosshair, onSelect, onCrosshair, onWindowLevel, onSliceChange, testAdapter = false }: { plane: Orientation; result?: MprPlaneResult; selected?: boolean; index: number; windowWidth?: number; windowCenter?: number; crosshair?: { x: number; y: number }; onSelect?: () => void; onCrosshair?: (x: number, y: number) => void; onWindowLevel?: (width: number, center: number) => void; onSliceChange?: (delta: number) => void; testAdapter?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string>();
+  const [windowing, setWindowing] = useState({ width: windowWidth, center: windowCenter });
+  const [crosshair, setCrosshair] = useState({ x: 0.5, y: 0.5 });
+  const [sampleHu, setSampleHu] = useState(-1024);
+  const [view, setView] = useState({ zoom: 1, panX: 0, panY: 0 });
+  const valuesRef = useRef<Float32Array | undefined>(undefined);
+  const shapeRef = useRef<[number, number]>(result?.shapeYx ?? [400, 640]);
+  const drag = useRef<{ mode: "crosshair" | "window" | "pan"; x: number; y: number; width: number; center: number; panX: number; panY: number } | undefined>(undefined);
+
+  useEffect(() => {
+    setWindowing({ width: windowWidth, center: windowCenter });
+  }, [windowCenter, windowWidth]);
+  useEffect(() => {
+    if (linkedCrosshair) setCrosshair(linkedCrosshair);
+  }, [linkedCrosshair]);
+
   useEffect(() => {
     let cancelled = false;
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (typeof window !== "undefined" && window.location.hostname === "localhost") return;
     const draw = async () => {
+      if (isDomTestRuntime()) return;
       let context: CanvasRenderingContext2D | null = null;
-      try { context = canvas.getContext("2d"); } catch { return; }
+      try { context = canvas.getContext("2d", { alpha: false }); } catch { return; }
       if (!context) return;
-      const width = 512;
-      const height = 320;
+      const width = 640;
+      const height = 400;
       canvas.width = width;
       canvas.height = height;
       let values: Float32Array | undefined;
@@ -74,6 +97,8 @@ export function InteractiveMprPane({ plane, result, selected = false, index, win
           const artifact = await readBinaryArtifact(result.artifactPath);
           values = artifact.values;
           shape = [artifact.shape[0], artifact.shape[1]];
+          valuesRef.current = values;
+          shapeRef.current = [shape[0], shape[1]];
           if (!cancelled) setError(undefined);
         } catch (cause) {
           if (!cancelled) setError(cause instanceof Error ? cause.message : "Unable to read MPR artifact");
@@ -87,8 +112,8 @@ export function InteractiveMprPane({ plane, result, selected = false, index, win
           const sx = Math.min(sourceWidth - 1, Math.floor(x * sourceWidth / width));
           const sy = Math.min(sourceHeight - 1, Math.floor(y * sourceHeight / height));
           const sourceIndex = sy * sourceWidth + sx;
-          const value = values ? values[sourceIndex] : -1000 + (((sx * 13 + sy * 7 + index * 17) % 1200));
-          const gray = windowLevel(value, windowWidth, windowCenter);
+          const value = values ? values[sourceIndex] : testAdapter ? -1000 + (((sx * 13 + sy * 7 + index * 17) % 1200)) : -1024;
+          const gray = windowLevel(value, windowing.width, windowing.center);
           const offset = (y * width + x) * 4;
           image.data[offset] = gray;
           image.data[offset + 1] = gray;
@@ -97,18 +122,51 @@ export function InteractiveMprPane({ plane, result, selected = false, index, win
         }
       }
       context.putImageData(image, 0, 0);
+      context.save();
+      context.translate(width / 2 + view.panX, height / 2 + view.panY);
+      context.scale(view.zoom, view.zoom);
+      context.translate(-width / 2, -height / 2);
       context.strokeStyle = orange;
-      context.lineWidth = 1;
-      context.beginPath(); context.moveTo(width / 2, 0); context.lineTo(width / 2, height); context.moveTo(0, height / 2); context.lineTo(width, height / 2); context.stroke();
+      context.lineWidth = 1 / view.zoom;
+      context.beginPath(); context.moveTo(crosshair.x * width, 0); context.lineTo(crosshair.x * width, height); context.moveTo(0, crosshair.y * height); context.lineTo(width, crosshair.y * height); context.stroke();
+      context.restore();
       context.fillStyle = "#ecf0f1"; context.font = "600 14px system-ui"; context.fillText(plane[0].toUpperCase() + plane.slice(1), 12, 22);
-      context.font = "12px system-ui"; context.fillText(`${index} · ${result?.coordinateMm?.toFixed(2) ?? "—"} mm`, 12, height - 12); context.textAlign = "right"; context.fillText(`W ${windowWidth} / L ${windowCenter}`, width - 12, height - 12); context.textAlign = "left";
+      context.font = "12px system-ui"; context.fillText(`slice ${index} · ${result?.coordinateMm?.toFixed(2) ?? "—"} mm`, 12, height - 12); context.textAlign = "right"; context.fillText(`W ${Math.round(windowing.width)} / L ${Math.round(windowing.center)}`, width - 12, height - 12); context.textAlign = "left";
     };
     void draw();
     return () => { cancelled = true; };
-  }, [index, plane, result, windowCenter, windowWidth]);
-  return <button type="button" className={`ct-pane interactive-mpr ${selected ? "selected" : ""}`} onClick={onSelect} onDoubleClick={() => onCrosshair?.(0.5, 0.5)} aria-label={testAdapter ? `${plane} synthetic CT slice` : `${plane} DICOM MPR pane`}>
-    <canvas ref={canvasRef} role="img" aria-label={`${plane} MPR from ${result?.source ?? "sidecar"}`} onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); onCrosshair?.((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height); }} />
+  }, [crosshair, index, plane, result, testAdapter, view, windowing]);
+
+  const eventPoint = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) };
+  };
+  const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const point = eventPoint(event);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const mode = event.shiftKey ? "window" : event.button === 1 || event.altKey ? "pan" : "crosshair";
+    drag.current = { mode, x: event.clientX, y: event.clientY, width: windowing.width, center: windowing.center, panX: view.panX, panY: view.panY };
+    if (mode === "crosshair") { setCrosshair(point); onCrosshair?.(point.x, point.y); }
+  };
+  const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const active = drag.current;
+    if (!active) return;
+    const point = eventPoint(event);
+      if (active.mode === "crosshair") { setCrosshair(point); onCrosshair?.(point.x, point.y); }
+    const [height, width] = shapeRef.current;
+    const sx = Math.max(0, Math.min(width - 1, Math.floor(point.x * width)));
+    const sy = Math.max(0, Math.min(height - 1, Math.floor(point.y * height)));
+    const value = valuesRef.current?.[sy * width + sx] ?? (testAdapter ? -1000 + (((sx * 13 + sy * 7 + index * 17) % 1200)) : -1024);
+    setSampleHu(value);
+    if (active.mode === "window") { const width = Math.max(1, active.width + (event.clientX - active.x) * 4); const center = active.center - (event.clientY - active.y) * 4; setWindowing({ width, center }); onWindowLevel?.(width, center); }
+    if (active.mode === "pan") setView((value) => ({ ...value, panX: active.panX + event.clientX - active.x, panY: active.panY + event.clientY - active.y }));
+  };
+  const handlePointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => { drag.current = undefined; event.currentTarget.releasePointerCapture(event.pointerId); };
+  const reset = () => { setView({ zoom: 1, panX: 0, panY: 0 }); setWindowing({ width: windowWidth, center: windowCenter }); setCrosshair({ x: 0.5, y: 0.5 }); setSampleHu(-1024); onCrosshair?.(0.5, 0.5); };
+  return <button type="button" className={`ct-pane interactive-mpr ${selected ? "selected" : ""}`} onClick={onSelect} aria-label={testAdapter ? `${plane} synthetic CT slice` : `${plane} DICOM MPR pane`}>
+    <canvas ref={canvasRef} role="img" aria-label={`${plane} MPR from ${result?.source ?? "sidecar"}`} onWheel={(event) => { event.preventDefault(); onSliceChange?.(event.deltaY > 0 ? 1 : -1); }} onDoubleClick={reset} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} />
     <span className="mpr-orientation-labels" aria-hidden="true">L/R · A/P · S/I</span>
+    <span className="mpr-readout" aria-live="polite">HU {Math.round(sampleHu)} · voxel {Math.round(crosshair.x * (result?.shapeYx?.[1] ?? 0))},{Math.round(crosshair.y * (result?.shapeYx?.[0] ?? 0))} · physical {result?.coordinateMm?.toFixed(2) ?? "—"} mm · zoom {view.zoom.toFixed(2)}×</span>
     {error && <span className="mpr-artifact-error">{error}</span>}
   </button>;
 }
@@ -129,91 +187,241 @@ export function VolumePreview({ cropActive = true }: { cropActive?: boolean }) {
   </div>;
 }
 
-export function InteractiveVolumePreview({ result, onReset }: { result?: VolumePreviewResult; onReset?: () => void }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [angle, setAngle] = useState(0);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (typeof window !== "undefined" && window.location.hostname === "localhost") return;
-    let context: CanvasRenderingContext2D | null = null;
-    try { context = canvas?.getContext("2d") ?? null; } catch { return; }
-    if (!canvas || !context) return;
-    canvas.width = 520; canvas.height = 330;
-    context.fillStyle = "#101314"; context.fillRect(0, 0, canvas.width, canvas.height);
-    const cx = 260 + Math.sin(angle) * 20;
-    const cy = 168;
-    const sx = 160 + Math.cos(angle) * 12;
-    context.strokeStyle = "#8db4b5"; context.lineWidth = 2; context.globalAlpha = 0.8;
-    context.beginPath(); context.ellipse(cx, cy, sx, 100, angle, 0, Math.PI * 2); context.stroke();
-    context.strokeStyle = orange; context.setLineDash([6, 5]); context.strokeRect(92, 62, 336, 208); context.setLineDash([]);
-    context.fillStyle = "#d1d5d6"; context.font = "12px system-ui"; context.fillText(`3D volume · ${result?.resolution ?? "waiting for sidecar"}`, 14, 24); context.fillText(result?.artifactPath ? "Refined preview artifact · preview only" : "Controlled test preview · preview only", 14, 312);
-  }, [angle, result]);
-  return <div className="volume-preview interactive-volume" role="img" aria-label={`Interactive ${result?.artifactPath ? "DICOM" : "controlled test"} 3D volume preview`} onWheel={(event) => { event.preventDefault(); setAngle((value) => value + event.deltaY * 0.01); }} onDoubleClick={() => { setAngle(0); onReset?.(); }}><canvas ref={canvasRef} /><button type="button" className="volume-reset" aria-label="Reset volume view" onClick={() => setAngle(0)}><Icon name="fit" size={14} /></button></div>;
+function webgl2Available(): boolean {
+  if (typeof document === "undefined" || isDomTestRuntime()) return false;
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(canvas.getContext("webgl2"));
+  } catch {
+    return false;
+  }
 }
 
-export function DesignViewport({ selectedId, onSelect, scene = [] }: { selectedId: string; onSelect: (id: string) => void; scene?: SceneObject[] }) {
-  const visible = scene.filter((object) => object.visible);
-  const extent = Math.max(1, ...visible.map((object) => {
-    const dimensions = object.dimensionsMm ?? object.transform.scale;
-    return Math.max(Math.abs(dimensions.x), Math.abs(dimensions.y), Math.abs(object.transform.position.x), Math.abs(object.transform.position.y));
-  }));
-  const unit = Math.min(1.6, 285 / extent);
-  const project = (value: number, axis: "x" | "y") => axis === "x" ? 370 + value * unit : 258 - value * unit;
-  const drawPrimitive = (object: SceneObject) => {
-    const dimensions = object.dimensionsMm ?? object.transform.scale;
-    const width = Math.max(8, Math.abs(dimensions.x) * unit);
-    const height = Math.max(8, Math.abs(dimensions.y) * unit);
-    const cx = project(object.transform.position.x, "x");
-    const cy = project(object.transform.position.y, "y");
-    const x = cx - width / 2;
-    const y = cy - height / 2;
-    const fill = object.tool === "T1" ? "#3f4f53" : object.kind === "dicom" ? "#1f3a3c" : "#303a3d";
-    const stroke = object.id === selectedId ? orange : object.kind === "dicom" ? "#58a9a7" : "#aeb6b8";
-    const transform = `rotate(${object.transform.rotation.z} ${cx} ${cy})`;
-    const common = { onClick: () => onSelect(object.id), style: { cursor: "pointer" as const }, opacity: object.kind === "group" ? 0.55 : 0.88 };
-    if (object.kind === "cylinder") return <g key={object.id} transform={transform} {...common}><ellipse cx={cx} cy={cy} rx={width / 2} ry={height / 2} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} /><path d={`M${x + width / 2} ${y}v${height}`} stroke={stroke} strokeWidth="1" opacity=".6" /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
-    if (object.kind === "wedge") return <g key={object.id} transform={transform} {...common}><path d={`M${x} ${y + height}L${x} ${y + height * 0.2}L${x + width} ${y}L${x + width} ${y + height}Z`} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
-    if (object.kind === "polygon-prism") {
-      const sides = Math.max(3, object.polygonSides ?? 6);
-      const points = Array.from({ length: sides }, (_, index) => { const angle = -Math.PI / 2 + index * (Math.PI * 2 / sides); return `${cx + Math.cos(angle) * width / 2},${cy + Math.sin(angle) * height / 2}`; }).join(" ");
-      return <g key={object.id} transform={transform} {...common}><polygon points={points} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
-    }
-    return <g key={object.id} transform={transform} {...common}><rect x={x} y={y} width={width} height={height} rx={object.kind === "group" ? 10 : 2} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} strokeDasharray={object.kind === "group" ? "5 3" : undefined} /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
+function WebGL2Unavailable({ label }: { label: string }) {
+  return <div className="webgl2-unavailable" role="alert"><Icon name="warning" size={18} /><strong>WebGL2 unavailable</strong><span>{label} requires a WebGL2-capable renderer; no approximate canvas fallback is used.</span></div>;
+}
+
+const volumeVertexShader = /* glsl */ `#version 300 es
+in vec3 position;
+uniform mat4 modelViewMatrix;
+uniform mat4 projectionMatrix;
+out vec3 vPosition;
+void main() {
+  vPosition = position * 0.5 + 0.5;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const volumeFragmentShader = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler3D;
+uniform sampler3D volume;
+uniform int mode;
+uniform float threshold;
+in vec3 vPosition;
+out vec4 outColor;
+void main() {
+  vec3 ray = normalize(vec3(0.0, 0.0, 1.0));
+  float maximum = 0.0;
+  float accumulation = 0.0;
+  float alpha = 0.0;
+  for (int step = 0; step < 96; step++) {
+    float t = float(step) / 95.0;
+    vec3 samplePosition = clamp(vPosition - ray * (t - 0.5), 0.0, 1.0);
+    float value = texture(volume, samplePosition).r;
+    if (mode == 1) maximum = max(maximum, value);
+    else if (mode == 2) { if (value >= threshold && alpha == 0.0) { alpha = 0.92; accumulation = value; } }
+    else { float sampleAlpha = smoothstep(0.18, 0.82, value) * 0.06; accumulation += value * sampleAlpha * (1.0 - alpha); alpha += sampleAlpha * (1.0 - alpha); }
+  }
+  float intensity = mode == 1 ? maximum : accumulation;
+  if (mode == 2 && alpha == 0.0) discard;
+  float a = mode == 2 ? alpha : max(alpha, 0.45);
+  outColor = vec4(vec3(intensity * 0.82 + 0.16, intensity * 0.94 + 0.12, intensity + 0.1), a);
+}`;
+
+function VolumeShaderMesh({ texture, mode, threshold }: { texture: THREE.Data3DTexture; mode: "dvr" | "mip" | "iso"; threshold: number }) {
+  const material = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: { volume: { value: texture }, mode: { value: mode === "dvr" ? 0 : mode === "mip" ? 1 : 2 }, threshold: { value: threshold } },
+    vertexShader: volumeVertexShader,
+    fragmentShader: volumeFragmentShader,
+    transparent: true,
+    side: THREE.BackSide,
+    depthWrite: false,
+    glslVersion: THREE.GLSL3,
+  }), [mode, texture, threshold]);
+  useEffect(() => () => material.dispose(), [material]);
+  return <mesh><boxGeometry args={[2, 2, 2]} /><primitive object={material} attach="material" /></mesh>;
+}
+
+function VolumeCropHandles({ crop, bounds, onCropChange }: { crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
+  const [active, setActive] = useState<{ axis: keyof CropBounds; side: 0 | 1 }>();
+  if (!crop || !bounds || !onCropChange) return null;
+  const position = (axis: keyof CropBounds, side: 0 | 1): [number, number, number] => {
+    const values = [0, 0, 0];
+    (Object.keys(bounds) as Array<keyof CropBounds>).forEach((key, index) => { const range = bounds[key]; values[index] = ((crop[key][side] - range[0]) / Math.max(1e-6, range[1] - range[0])) * 2 - 1; });
+    return values as [number, number, number];
   };
-  return <div className="design-viewport" role="img" aria-label="Interactive parametric design scene preview" data-testid="design-scene-viewport">
-    <svg viewBox="0 0 740 510" preserveAspectRatio="none">
-      <defs><pattern id="design-grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#4c5255" strokeWidth=".6" /></pattern></defs>
-      <rect width="740" height="510" fill="#141719" /><rect x="28" y="25" width="684" height="450" rx="4" fill="url(#design-grid)" opacity=".52" />
-      {visible.length ? visible.map(drawPrimitive) : <text x="370" y="250" textAnchor="middle" fill="#aeb5b7" fontSize="14">Add a primitive or import a validated solid</text>}
-      <g fill="#dfe3e5" fontSize="12"><text x="42" y="50">Scene preview · physical coordinates</text><text x="50" y="493">X {visible.length ? "mapped" : "0.0"} mm</text><text x="352" y="493">Y {visible.length ? "mapped" : "0.0"} mm</text><text x="650" y="493">Z {visible.length ? "mapped" : "0.0"} mm</text></g>
-      <g transform="translate(28 58)"><circle cx="0" cy="0" r="15" fill="#202426" stroke="#72787b"/><path d="M0-9v18M-9 0h18" stroke="#d2d5d6"/><circle cx="0" cy="0" r="3" fill={orange}/></g>
-    </svg>
+  return <group>{(Object.keys(bounds) as Array<keyof CropBounds>).flatMap((axis) => [0, 1].map((side) => <mesh key={`${axis}-${side}`} position={position(axis, side as 0 | 1)} onPointerDown={(event) => { event.stopPropagation(); setActive({ axis, side: side as 0 | 1 }); }} onPointerUp={() => setActive(undefined)} onPointerMove={(event) => {
+    if (!active || active.axis !== axis || active.side !== side) return;
+    event.stopPropagation();
+    const component = axis === "x" ? event.point.x : axis === "y" ? event.point.y : event.point.z;
+    const normalized = Math.max(-1, Math.min(1, component));
+    const range = bounds[axis];
+    const nextValue = range[0] + ((normalized + 1) / 2) * (range[1] - range[0]);
+    const next = [...crop[axis]] as [number, number];
+    next[side] = Math.max(range[0], Math.min(range[1], nextValue));
+    if (next[0] > next[1]) next[side] = next[side === 0 ? 1 : 0];
+    onCropChange({ ...crop, [axis]: next });
+  }}><sphereGeometry args={[0.07, 12, 8]} /><meshBasicMaterial color={orange} /></mesh>))}</group>;
+}
+
+function VolumeScene({ result, values, shape, mode, threshold, crop, bounds, onCropChange }: { result?: VolumePreviewResult; values: Float32Array; shape: [number, number, number]; mode: "dvr" | "mip" | "iso"; threshold: number; crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
+  const texture = useMemo(() => {
+    const [depth, height, width] = shape;
+    const data = new THREE.Data3DTexture(values, width, height, depth);
+    data.format = THREE.RedFormat;
+    data.type = THREE.FloatType;
+    data.minFilter = THREE.LinearFilter;
+    data.magFilter = THREE.LinearFilter;
+    data.unpackAlignment = 1;
+    data.needsUpdate = true;
+    return data;
+  }, [shape, values]);
+  return <>
+    <PerspectiveCamera makeDefault position={[3.4, 2.5, 3.4]} fov={42} near={0.1} far={100} />
+    <ambientLight intensity={0.2} />
+    <VolumeShaderMesh texture={texture} mode={mode} threshold={threshold} />
+    <mesh rotation={[0, 0, 0]}><boxGeometry args={[2.02, 2.02, 2.02]} /><meshBasicMaterial color={orange} wireframe transparent opacity={0.48} /></mesh>
+    <Line points={[[0, 0, -1.04], [0, 0, 1.04]]} color={orange} lineWidth={1} transparent opacity={0.7} />
+    <Line points={[[-1.04, 0, 0], [1.04, 0, 0]]} color={orange} lineWidth={1} transparent opacity={0.7} />
+    <Line points={[[0, -1.04, 0], [0, 1.04, 0]]} color={orange} lineWidth={1} transparent opacity={0.7} />
+    <VolumeCropHandles crop={crop} bounds={bounds} onCropChange={onCropChange} />
+    <OrbitControls makeDefault enablePan enableZoom enableRotate />
+    <Html position={[-1, 1.1, 0]} transform><span className="volume-overlay-label">{mode.toUpperCase()} · {result?.resolution ?? `${shape.join(" × ")}`} · preview only</span></Html>
+  </>;
+}
+
+export function InteractiveVolumePreview({ result, onReset, crop, bounds, onCropChange }: { result?: VolumePreviewResult; onReset?: () => void; crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
+  const [payload, setPayload] = useState<{ values: Float32Array; shape: [number, number, number] }>();
+  const [error, setError] = useState<string>();
+  const [mode, setMode] = useState<"dvr" | "mip" | "iso">("dvr");
+  const [threshold, setThreshold] = useState(0.52);
+  const [cameraVersion, setCameraVersion] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    if (!result?.artifactPath) { setPayload(undefined); return; }
+    void readBinaryArtifact(result.artifactPath).then((artifact) => {
+      if (!cancelled && artifact.shape.length === 3) setPayload({ values: artifact.values, shape: [artifact.shape[0], artifact.shape[1], artifact.shape[2]] });
+    }).catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : "Unable to read volume preview artifact"); });
+    return () => { cancelled = true; };
+  }, [result?.artifactPath]);
+  const reset = () => { setCameraVersion((value) => value + 1); onReset?.(); };
+  return <div className="volume-preview interactive-volume" role="img" aria-label="Interactive WebGL2 DICOM volume preview" data-voxelweave-renderer="three-r3f">
+    {!webgl2Available() && <WebGL2Unavailable label="The DICOM volume" />}
+    {webgl2Available() && !payload && <div className="volume-artifact-state"><Icon name="database" size={18} /><span>{error ?? "Waiting for the binary preview payload from the local sidecar…"}</span></div>}
+    {webgl2Available() && payload && <Canvas key={cameraVersion} gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setError("The active renderer did not expose WebGL2"); }}><VolumeScene result={result} values={payload.values} shape={payload.shape} mode={mode} threshold={threshold} crop={crop} bounds={bounds} onCropChange={onCropChange} /></Canvas>}
+    <div className="volume-controls" role="group" aria-label="Volume rendering mode"><select aria-label="Volume mode" value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="dvr">DVR</option><option value="mip">MIP</option><option value="iso">Isosurface</option></select>{mode === "iso" && <input aria-label="Isosurface threshold" type="range" min="0" max="1" step="0.01" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />}<button type="button" className="volume-reset" aria-label="Reset volume view" onClick={reset}><Icon name="fit" size={14} /></button></div>
   </div>;
 }
 
+function meshGeometry(object: SceneObject): THREE.BufferGeometry {
+  if (object.vertices?.length && object.faces?.length) {
+    const geometry = new THREE.BufferGeometry();
+    const vertices = new Float32Array(object.vertices.flatMap((vertex) => [vertex[0] ?? 0, vertex[1] ?? 0, vertex[2] ?? 0]));
+    const indices = new Uint32Array(object.faces.flatMap((face) => [face[0] ?? 0, face[1] ?? 0, face[2] ?? 0]));
+    geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeVertexNormals();
+    return geometry;
+  }
+  const dimensions = object.dimensionsMm ?? object.transform.scale;
+  if (object.kind === "cylinder") return new THREE.CylinderGeometry(Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.z), 48);
+  if (object.kind === "polygon-prism") return new THREE.CylinderGeometry(Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.z), Math.max(3, object.polygonSides ?? 6));
+  return new THREE.BoxGeometry(Math.max(0.1, dimensions.x), Math.max(0.1, dimensions.y), Math.max(0.1, dimensions.z));
+}
+
+function SceneMesh({ object, selected, onSelect }: { object: SceneObject; selected: boolean; onSelect: () => void }) {
+  const geometry = useMemo(() => meshGeometry(object), [object]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  const dimensions = object.dimensionsMm ?? object.transform.scale;
+  return <mesh geometry={geometry} position={[object.transform.position.x, object.transform.position.y, object.transform.position.z]} rotation={[object.transform.rotation.x, object.transform.rotation.y, object.transform.rotation.z]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
+    <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent opacity={object.visible ? 0.86 : 0.12} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
+    {selected && <lineSegments><edgesGeometry args={[geometry]} /><lineBasicMaterial color={orange} /></lineSegments>}
+    <Html position={[0, dimensions.y / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>
+  </mesh>;
+}
+
+function DesignScene({ selectedId, onSelect, scene }: { selectedId: string; onSelect: (id: string) => void; scene: SceneObject[] }) {
+  return <>
+    <PerspectiveCamera makeDefault position={[120, 120, 160]} fov={42} near={0.1} far={2000} />
+    <ambientLight intensity={0.58} />
+    <directionalLight position={[140, 180, 120]} intensity={1.3} />
+    <gridHelper args={[400, 40, "#697477", "#273033"]} rotation={[0, 0, 0]} />
+    <axesHelper args={[60]} />
+    {scene.filter((object) => object.visible).map((object) => <SceneMesh key={object.id} object={object} selected={object.id === selectedId} onSelect={() => onSelect(object.id)} />)}
+    <OrbitControls makeDefault enablePan enableZoom enableRotate />
+    <Html position={[-140, 120, 0]}><span className="viewport-badge">Scene · physical mm · manifold CSG worker</span></Html>
+  </>;
+}
+
+export function DesignViewport({ selectedId, onSelect, scene = [] }: { selectedId: string; onSelect: (id: string) => void; scene?: SceneObject[] }) {
+  const [workerState, setWorkerState] = useState("validating");
+  useEffect(() => {
+    let worker: Worker | undefined;
+    try {
+      worker = new Worker(new URL("../workers/manifoldWorker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (event: MessageEvent<{ ok: boolean; message?: string }>) => setWorkerState(event.data.ok ? "validated" : event.data.message ?? "validation unavailable");
+      worker.onerror = () => setWorkerState("validation unavailable");
+      worker.postMessage({ operation: "preview", scene: scene.map((object) => ({ id: object.id, kind: object.kind, dimensions: object.dimensionsMm ?? object.transform.scale, vertices: object.vertices, faces: object.faces, boolean: object.boolean })) });
+    } catch { setWorkerState("validation unavailable"); }
+    return () => worker?.terminate();
+  }, [scene]);
+  return <div className="design-viewport" role="img" aria-label="Interactive parametric design scene preview" data-testid="design-scene-viewport" data-voxelweave-renderer="three-r3f">
+    {!webgl2Available() && <WebGL2Unavailable label="The parametric design scene" />}
+    {webgl2Available() && <Canvas gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setWorkerState("WebGL2 unavailable"); }}><DesignScene selectedId={selectedId} onSelect={onSelect} scene={scene} /></Canvas>}
+    <span className="viewport-validation-state" aria-live="polite">{workerState}</span>
+  </div>;
+}
+
+type PathInstance = { start: [number, number, number]; end: [number, number, number]; tool: ToolId; selected: boolean };
+
+function ToolpathInstances({ selectedLayer, activeTool, generated }: { selectedLayer: number; activeTool: ToolId; generated: boolean }) {
+  const ref = useRef<THREE.InstancedMesh>(null);
+  const instances = useMemo<PathInstance[]>(() => Array.from({ length: generated ? 720 : 0 }, (_, index) => {
+    const row = Math.floor(index / 24);
+    const column = index % 24;
+    const x = -80 + column * 6.8;
+    const y = -55 + row * 5.8;
+    const nextX = x + (row % 2 ? -5.7 : 5.7);
+    return { start: [x, y, (selectedLayer % 20) * 0.2] as [number, number, number], end: [nextX, y + Math.sin(column * 0.8 + row) * 1.2, (selectedLayer % 20) * 0.2] as [number, number, number], tool: index % 5 === 0 ? "T1" : "T0", selected: activeTool === (index % 5 === 0 ? "T1" : "T0") };
+  }), [activeTool, generated, selectedLayer]);
+  useEffect(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    const helper = new THREE.Object3D();
+    const color = new THREE.Color();
+    instances.forEach((segment, index) => {
+      const [sx, sy, sz] = segment.start;
+      const [ex, ey, ez] = segment.end;
+      const dx = ex - sx; const dy = ey - sy; const dz = ez - sz;
+      const length = Math.max(0.1, Math.hypot(dx, dy, dz));
+      helper.position.set((sx + ex) / 2, (sy + ey) / 2, (sz + ez) / 2);
+      helper.rotation.set(0, -Math.atan2(dz, Math.hypot(dx, dy)), Math.atan2(dy, dx));
+      helper.scale.set(length, 0.36, 0.36);
+      helper.updateMatrix();
+      mesh.setMatrixAt(index, helper.matrix);
+      color.set(segment.selected ? orange : segment.tool === "T1" ? teal : "#aeb6b8");
+      mesh.setColorAt(index, color);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [instances]);
+  return <instancedMesh ref={ref} args={[undefined, undefined, Math.max(1, instances.length)]}><boxGeometry args={[1, 1, 1]} /><meshStandardMaterial vertexColors roughness={0.72} metalness={0.05} /></instancedMesh>;
+}
+
 export function ToolpathCanvas({ selectedLayer, activeTool = "T0", generated = true, totalLayers }: { selectedLayer: number; activeTool?: ToolId; generated?: boolean; totalLayers?: number }) {
-  const lanes = Array.from({ length: 16 }, (_, row) => {
-    const y = 110 + row * 19;
-    const points = Array.from({ length: 12 }, (_, col) => `${115 + col * 43},${y + Math.sin(col * 1.7 + row) * 4}`).join(" ");
-    return <polyline key={row} points={points} fill="none" stroke={row % 3 === 0 ? teal : "#bfc4c6"} strokeWidth={row % 3 === 0 ? 3 : 2} strokeLinecap="round" opacity={row % 5 === 0 ? .94 : .73} />;
-  });
-  const vertical = Array.from({ length: 13 }, (_, col) => {
-    const x = 115 + col * 43;
-    return <polyline key={col} points={Array.from({ length: 11 }, (_, row) => `${x + Math.cos(row * 1.4 + col) * 3},${105 + row * 24}`).join(" ")} fill="none" stroke={col === 6 ? orange : "#a8afb1"} strokeWidth={col === 6 ? 3 : 1.4} opacity={col === 6 ? 1 : .48} />;
-  });
-  return <div className="toolpath-canvas" role="img" aria-label={`Generated segment preview for layer ${selectedLayer}`}>
-    <svg viewBox="0 0 760 560" preserveAspectRatio="none">
-      <defs><pattern id="toolpath-grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#394043" strokeWidth=".7" /></pattern></defs>
-      <rect width="760" height="560" fill="#101314" /><path d="M70 62 673 42l44 408-620 42L70 62Z" fill="url(#toolpath-grid)" stroke="#5e686b" strokeWidth="1.4" />
-      <path d="M108 100 655 83l31 330-563 35-15-348Z" fill="#15191a" stroke="#e0e4e4" strokeWidth="1.2" strokeDasharray="7 5" />
-      <path d="M126 112 638 97l26 300-528 31-10-316Z" fill="none" stroke="#8b989b" strokeWidth="1" opacity=".42" />
-      <g>{lanes}{vertical}</g>
-      <path d="M121 356 C230 344 288 373 351 327 S466 278 617 288" fill="none" stroke={orange} strokeWidth="6" strokeLinecap="round" />
-      <g transform="translate(24 22)"><path d="m0 25 23-13 23 13-23 13L0 25Z" fill="#f4f4f2" stroke="#9da3a5"/><path d="M23 12v26M0 25v28M46 25v28" stroke="#899093"/><text x="23" y="9" textAnchor="middle" fill="#2a4b8d" fontSize="11">Z</text><text x="-2" y="29" fill="#418053" fontSize="11">Y</text><text x="48" y="29" fill="#b94c23" fontSize="11">X</text></g>
-      <text x="690" y="32" textAnchor="end" fill="#d8dddf" fontSize="13">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected</text>
-      <g fill="#a9b0b3" fontSize="12"><text x="102" y="506">ORIGINAL PRUSA XL · local sidecar bed coordinates</text><text x="650" y="530" textAnchor="end">{generated ? "Generated-segment stream · source-bound" : "Preview canvas · awaiting sidecar generation"}</text></g>
-      <g transform="translate(670 475)"><path d="M0 30V0M0 30h28M0 30l-18 14" stroke="#5583c2" strokeWidth="2"/><text x="2" y="-5" fill="#5583c2" fontSize="11">Z</text><text x="31" y="34" fill="#b94c23" fontSize="11">X</text><text x="-28" y="48" fill="#4d987a" fontSize="11">Y</text></g>
-    </svg>
+  return <div className="toolpath-canvas" role="img" aria-label={`Generated segment preview for layer ${selectedLayer}`} data-voxelweave-renderer="three-r3f">
+    {!webgl2Available() && <WebGL2Unavailable label="The toolpath renderer" />}
+    {webgl2Available() && <Canvas gl={{ antialias: true, powerPreference: "high-performance" }}><PerspectiveCamera makeDefault position={[0, -150, 210]} fov={46} near={0.1} far={1000} /><ambientLight intensity={0.45} /><directionalLight position={[100, 120, 180]} intensity={1.1} /><gridHelper args={[220, 22, "#697477", "#293033"]} /><mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -1]}><planeGeometry args={[190, 150]} /><meshStandardMaterial color="#15191a" /></mesh><ToolpathInstances selectedLayer={selectedLayer} activeTool={activeTool} generated={generated} /><OrbitControls makeDefault enablePan enableZoom enableRotate /><Html position={[-100, 76, 0]}><span className="viewport-badge">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected · instanced paths</span></Html></Canvas>}
   </div>;
 }
 
