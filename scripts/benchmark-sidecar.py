@@ -245,6 +245,7 @@ def _run_iteration(command: list[str], iteration_dir: Path, request_timeout_seco
                 "calibration": _calibration(),
                 "tool": "T0",
                 "allow_calibration_clipping": True,
+                "acknowledge_calibration_clipping": True,
                 "profile": {"printer": "Prusa XL", "sample_step_mm": 2.0},
             },
         )
