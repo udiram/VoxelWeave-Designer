@@ -54,18 +54,6 @@ jobs:
         run: pnpm --dir apps/desktop exec playwright install chromium
       - name: Run desktop gates (Chromium/test-adapter coverage)
         run: pnpm run check:desktop
-      - name: Qualify production Chromium UI performance (browser adapter and WebGL2 probe)
-        run: |
-          set -euo pipefail
-          pnpm --dir apps/desktop exec node ../../scripts/benchmark-desktop-ui.mjs \
-            --output-dir "$RUNNER_TEMP/voxelweave-desktop-ui-performance"
-      - name: Upload browser UI performance evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: desktop-browser-ui-performance
-          path: ${{ runner.temp }}/voxelweave-desktop-ui-performance
-          if-no-files-found: warn
       - name: Build the arm64 sidecar and run JSONL cross-runtime smoke
         run: |
           set -euo pipefail
@@ -109,6 +97,39 @@ jobs:
           name: desktop-native-bundle
           path: apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
           if-no-files-found: ignore
+
+  browser-ui-performance:
+    name: Desktop Chromium UI performance
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.17.0
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium and Linux browser dependencies
+        run: pnpm --dir apps/desktop exec playwright install --with-deps chromium
+      - name: Build the production desktop browser surface
+        run: pnpm --dir apps/desktop build
+      - name: Qualify Chromium UI performance and WebGL2
+        run: |
+          set -euo pipefail
+          pnpm --dir apps/desktop exec node ../../scripts/benchmark-desktop-ui.mjs \
+            --output-dir "$RUNNER_TEMP/voxelweave-desktop-ui-performance"
+      - name: Upload browser UI performance evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-browser-ui-performance
+          path: ${{ runner.temp }}/voxelweave-desktop-ui-performance
+          if-no-files-found: warn
 
   site-service:
     name: Site and release API lint, tests, build, and Chromium adapter E2E
