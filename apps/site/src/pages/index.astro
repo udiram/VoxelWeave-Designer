@@ -143,11 +143,12 @@ const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udira
             <h3 data-release-heading>Current public build</h3>
             <span class="release-tag" data-release-tag aria-live="polite"></span>
           </div>
+          <p class="release-channel" data-release-channel hidden></p>
           <div class="release-state" data-release-loading aria-live="polite">
             <p>Checking the current public release…</p>
           </div>
           <div class="release-state" data-release-empty hidden>
-            <p><strong>No signed public build is published yet.</strong> The release service has no Apple Silicon artifact to link. Follow the <a href={githubUrl} target="_blank" rel="noreferrer">GitHub source</a> for the reproducible project and return here when a release is published.</p>
+            <p><strong>No public Apple Silicon build is published yet.</strong> The release service has no artifact to link. Follow the <a href={githubUrl} target="_blank" rel="noreferrer">GitHub source</a> for the reproducible project and return here when a release is published.</p>
           </div>
           <div class="release-state" data-release-error hidden>
             <p><strong>Release details are temporarily unavailable.</strong> The site could not read the release service. The <a href={githubUrl} target="_blank" rel="noreferrer">GitHub source</a> remains available.</p>

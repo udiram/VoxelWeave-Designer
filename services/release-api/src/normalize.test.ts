@@ -7,6 +7,7 @@ describe('normalizeRelease', () => {
     const release: GitHubRelease = {
       tag_name: 'v0.1.0',
       name: 'VoxelWeave Designer v0.1.0',
+      prerelease: false,
       target_commitish: 'abc1234',
       published_at: '2026-08-04T12:00:00Z',
       body: '- [x] Unit + integration\n- [x] Desktop E2E\n- [x] Accessibility',
@@ -30,6 +31,7 @@ describe('normalizeRelease', () => {
     expect(view.artifacts[0]).toMatchObject({ architecture: 'Apple Silicon', sha256: 'a'.repeat(64), size: '284.6 MB' });
     expect(view.artifacts[0].downloadPath).toContain('/download/v0.1.0/');
     expect(view.releaseUrl).toBe('https://github.com/udiram/VoxelWeave-Designer/releases/tag/v0.1.0');
+    expect(view).toMatchObject({ prerelease: false, channel: 'stable' });
     expect(view.checks.find((check) => check.id === 'architecture')?.status).toBe('reported');
     expect(view.checks.find((check) => check.id === 'unit-integration')?.status).toBe('reported');
   });
@@ -42,5 +44,10 @@ describe('normalizeRelease', () => {
     const view = normalizeRelease(release, 'udiram/VoxelWeave-Designer');
     expect(view.artifacts[0].url).toBeNull();
     expect(view.releaseUrl).toBeNull();
+  });
+
+  it('labels development artifacts as explicitly not stable', () => {
+    const view = normalizeRelease({ tag_name: 'development-22', prerelease: true, assets: [] }, 'udiram/VoxelWeave-Designer');
+    expect(view).toMatchObject({ prerelease: true, channel: 'development-prerelease' });
   });
 });

@@ -44,8 +44,10 @@ export class GitHubClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  getLatest(): Promise<GitHubRelease | null> {
-    return this.getRelease('/releases/latest');
+  async getLatest(): Promise<GitHubRelease | null> {
+    const stable = await this.getRelease('/releases/latest');
+    if (stable) return stable;
+    return this.getFirstPublishedRelease('/releases?per_page=20');
   }
 
   getByTag(tag: string): Promise<GitHubRelease | null> {
@@ -80,6 +82,45 @@ export class GitHubClient {
       if (!value || typeof value.tag_name !== 'string' || !Array.isArray(value.assets)) {
         throw new Error(`GitHub API response for ${endpoint} was not a release`);
       }
+      this.cache.set(endpoint, {
+        value,
+        expiresAt: now + this.ttlMs,
+        etag: response.headers.get('etag') ?? undefined
+      });
+      return value;
+    } catch (error) {
+      if (cached) return cached.value;
+      throw error;
+    }
+  }
+
+  private async getFirstPublishedRelease(path: string): Promise<GitHubRelease | null> {
+    const endpoint = `/repos/${this.repo}${path}`;
+    const now = Date.now();
+    const cached = this.cache.get(endpoint);
+    if (cached && cached.expiresAt > now) return cached.value;
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'VoxelWeave-Release-Service/0.1'
+    };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    if (cached?.etag) headers['If-None-Match'] = cached.etag;
+
+    try {
+      const response = await this.fetchImpl(`${this.apiBaseUrl}${endpoint}`, { headers });
+      if (response.status === 304 && cached) {
+        cached.expiresAt = now + this.ttlMs;
+        return cached.value;
+      }
+      if (response.status === 404) {
+        this.cache.set(endpoint, { value: null, expiresAt: now + this.ttlMs });
+        return null;
+      }
+      if (!response.ok) throw new GitHubApiError(response.status, endpoint);
+      const releases = await response.json() as GitHubRelease[];
+      if (!Array.isArray(releases)) throw new Error(`GitHub API response for ${endpoint} was not a release list`);
+      const value = releases.find((release) => !release.draft && typeof release.tag_name === 'string' && Array.isArray(release.assets)) ?? null;
       this.cache.set(endpoint, {
         value,
         expiresAt: now + this.ttlMs,

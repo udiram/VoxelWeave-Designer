@@ -20,6 +20,8 @@ type Release = {
   tag?: string;
   tagName?: string;
   name?: string;
+  prerelease?: boolean;
+  channel?: 'stable' | 'development-prerelease';
   sourceRevision?: string | null;
   publishedAt?: string | null;
   artifacts?: ReleaseArtifact[];
@@ -37,6 +39,7 @@ const error = query<HTMLElement>('[data-release-error]');
 const table = query<HTMLElement>('[data-release-table]');
 const rows = query<HTMLTableSectionElement>('[data-release-rows]');
 const tag = query<HTMLElement>('[data-release-tag]');
+const channel = query<HTMLElement>('[data-release-channel]');
 const sourceRevision = query<HTMLElement>('[data-source-revision]');
 const publishedAt = query<HTMLTimeElement>('[data-published-at]');
 
@@ -156,8 +159,10 @@ const updateDownloadCtas = (release: Release | null) => {
     const label = cta.querySelector<HTMLElement>('[data-download-label]');
     if (href) {
       cta.href = href;
-      if (label) label.textContent = releaseCta ? 'Download VoxelWeave Designer' : 'Download for Apple Silicon';
-      cta.setAttribute('aria-label', 'Download the current Apple Silicon release');
+      const development = release?.prerelease === true || release?.channel === 'development-prerelease';
+      if (label) label.textContent = development ? 'Download development build' : releaseCta ? 'Download VoxelWeave Designer' : 'Download for Apple Silicon';
+      else cta.textContent = development ? 'Download development build' : 'Download for Apple Silicon';
+      cta.setAttribute('aria-label', development ? 'Download the current not-notarized Apple Silicon development build' : 'Download the current Apple Silicon release');
     } else if (releaseCta) {
       cta.href = cta.dataset.sourceUrl ?? '#evidence';
       if (label) label.textContent = 'View source on GitHub';
@@ -192,6 +197,14 @@ const renderRelease = (release: Release) => {
   }
   setState('release');
   if (tag) tag.textContent = release.tag ?? release.tagName ?? '';
+  if (channel) {
+    const development = release.prerelease === true || release.channel === 'development-prerelease';
+    channel.hidden = false;
+    channel.dataset.channel = development ? 'development-prerelease' : 'stable';
+    channel.textContent = development
+      ? 'Development prerelease · not signed or notarized · controlled testing only'
+      : 'Stable release · signed and notarized';
+  }
   if (sourceRevision) sourceRevision.textContent = release.sourceRevision ?? 'Not reported';
   if (publishedAt) {
     const value = release.publishedAt ?? '';

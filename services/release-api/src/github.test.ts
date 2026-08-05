@@ -33,4 +33,18 @@ describe('GitHubClient', () => {
     });
     await expect(client.getLatest()).resolves.toBeNull();
   });
+
+  it('falls back to the newest published prerelease when no stable release exists', async () => {
+    const prerelease = { ...release, tag_name: 'development-12', prerelease: true };
+    const fetchImpl = vi.fn(async (input: string | URL) => String(input).endsWith('/releases/latest')
+      ? new Response('{}', { status: 404 })
+      : new Response(JSON.stringify([{ ...prerelease, draft: false }]), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const client = new GitHubClient({
+      repo: 'udiram/VoxelWeave-Designer',
+      apiBaseUrl: 'https://api.github.com',
+      ttlMs: 60_000,
+      fetchImpl
+    });
+    await expect(client.getLatest()).resolves.toMatchObject({ tag_name: 'development-12', prerelease: true });
+  });
 });

@@ -89,6 +89,7 @@ const buildChecks = (release: GitHubRelease, artifacts: ReleaseArtifact[]): Rele
 
 export const normalizeRelease = (release: GitHubRelease, repo: string): ReleaseView => {
   const tag = release.tag_name;
+  const prerelease = release.prerelease === true || /^development(?:-|$)/i.test(tag);
   const artifacts = release.assets.filter(isArtifact).map<ReleaseArtifact>((asset) => {
     const url = verifiedDownloadUrl(asset.browser_download_url, repo);
     return {
@@ -104,6 +105,8 @@ export const normalizeRelease = (release: GitHubRelease, repo: string): ReleaseV
   return {
     tag,
     name: release.name ?? tag,
+    prerelease,
+    channel: prerelease ? 'development-prerelease' : 'stable',
     sourceRevision: sourceRevisionFor(release),
     publishedAt: release.published_at ?? release.created_at ?? null,
     releaseUrl: verifiedReleaseUrl(release.html_url, repo),

@@ -42,6 +42,8 @@ export type ReleaseArtifact = {
 export type ReleaseView = {
   tag: string;
   name: string;
+  prerelease: boolean;
+  channel: 'stable' | 'development-prerelease';
   sourceRevision: string | null;
   publishedAt: string | null;
   releaseUrl: string | null;

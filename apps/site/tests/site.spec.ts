@@ -20,7 +20,9 @@ const mockedRelease = async (page: import('@playwright/test').Page) => {
     contentType: 'application/json',
     body: JSON.stringify({
       release: {
-        tag: 'v0.1.0',
+        tag: 'development-12',
+        prerelease: true,
+        channel: 'development-prerelease',
         sourceRevision: 'abc1234',
         publishedAt: '2026-08-04T12:00:00Z',
         artifacts: [{
@@ -28,7 +30,7 @@ const mockedRelease = async (page: import('@playwright/test').Page) => {
           architecture: 'Apple Silicon',
           size: '284.6 MB',
           sha256: 'a'.repeat(64),
-          downloadPath: '/download/v0.1.0/VoxelWeave-Designer-arm64.dmg'
+          downloadPath: '/download/development-12/VoxelWeave-Designer-arm64.dmg'
         }],
         checks: [
           { id: 'unit-integration', status: 'reported', detail: 'Reported in release notes' },
@@ -51,7 +53,7 @@ test('homepage renders an honest no-release state and primary navigation', async
   await expect(page).toHaveTitle(/VoxelWeave Designer/);
   await expect(page.getByRole('heading', { name: 'Design CT phantoms from source volume to scan-back.' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'One project. Six accountable workspaces.' })).toBeVisible();
-  await expect(page.getByText('No signed public build is published yet.')).toBeVisible();
+  await expect(page.getByText('No public Apple Silicon build is published yet.')).toBeVisible();
   await expect(page.locator('[data-download-cta]').first()).toHaveAttribute('href', '#evidence');
   await expect(page.locator('[data-release-download-cta]')).toHaveAttribute('href', 'https://github.com/udiram/VoxelWeave-Designer');
   await expect(page.locator('[data-release-download-cta]')).toContainText('View source on GitHub');
@@ -84,10 +86,12 @@ test('mocked release renders artifact receipt, checks, checksum, and verified do
   await expect(row).toContainText('Apple Silicon');
   await expect(row).toContainText('284.6 MB');
   await expect(row.locator('code')).toHaveText('a'.repeat(64));
-  await expect(row.getByRole('link', { name: /Download VoxelWeave/ })).toHaveAttribute('href', '/download/v0.1.0/VoxelWeave-Designer-arm64.dmg');
-  await expect(page.locator('[data-release-tag]')).toHaveText('v0.1.0');
+  await expect(row.getByRole('link', { name: /Download VoxelWeave/ })).toHaveAttribute('href', '/download/development-12/VoxelWeave-Designer-arm64.dmg');
+  await expect(page.locator('[data-release-tag]')).toHaveText('development-12');
+  await expect(page.locator('[data-release-channel]')).toContainText('Development prerelease · not signed or notarized');
   await expect(page.locator('[data-check-id="release-checksum"]')).toHaveAttribute('data-status', 'reported');
-  await expect(page.locator('[data-download-cta]').first()).toHaveAttribute('href', '/download/v0.1.0/VoxelWeave-Designer-arm64.dmg');
+  await expect(page.locator('[data-download-cta]').first()).toHaveAttribute('href', '/download/development-12/VoxelWeave-Designer-arm64.dmg');
+  await expect(page.locator('[data-download-cta]').first()).toContainText('Download development build');
 });
 
 test('responsive widths keep the document inside the viewport', async ({ page }) => {
