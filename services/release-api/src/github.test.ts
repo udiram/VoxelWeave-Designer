@@ -13,7 +13,7 @@ describe('GitHubClient', () => {
       headers: { etag: '"release-1"', 'content-type': 'application/json' }
     }));
     const client = new GitHubClient({
-      repo: 'udbhavram/VoxelWeave',
+      repo: 'udiram/VoxelWeave',
       apiBaseUrl: 'https://api.github.com',
       ttlMs: 60_000,
       fetchImpl
@@ -21,12 +21,12 @@ describe('GitHubClient', () => {
     await client.getLatest();
     await client.getLatest();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(fetchImpl).toHaveBeenCalledWith('https://api.github.com/repos/udbhavram/VoxelWeave/releases/latest', expect.objectContaining({ headers: expect.objectContaining({ Accept: 'application/vnd.github+json' }) }));
+    expect(fetchImpl).toHaveBeenCalledWith('https://api.github.com/repos/udiram/VoxelWeave/releases/latest', expect.objectContaining({ headers: expect.objectContaining({ Accept: 'application/vnd.github+json' }) }));
   });
 
   it('returns null for a GitHub 404 release', async () => {
     const client = new GitHubClient({
-      repo: 'udbhavram/VoxelWeave',
+      repo: 'udiram/VoxelWeave',
       apiBaseUrl: 'https://api.github.com',
       ttlMs: 60_000,
       fetchImpl: async () => new Response('{}', { status: 404 })

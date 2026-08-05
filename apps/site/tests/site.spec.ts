@@ -53,7 +53,7 @@ test('homepage renders an honest no-release state and primary navigation', async
   await expect(page.getByRole('heading', { name: 'One project. Six accountable workspaces.' })).toBeVisible();
   await expect(page.getByText('No signed public build is published yet.')).toBeVisible();
   await expect(page.locator('[data-download-cta]').first()).toHaveAttribute('href', '#evidence');
-  await expect(page.locator('[data-release-download-cta]')).toHaveAttribute('href', 'https://github.com/udbhavram/VoxelWeave');
+  await expect(page.locator('[data-release-download-cta]')).toHaveAttribute('href', 'https://github.com/udiram/VoxelWeave');
   await expect(page.locator('[data-release-download-cta]')).toContainText('View source on GitHub');
   await expect(page.locator('img[alt*="DICOM workspace"]')).toHaveCount(1);
   expect(consoleErrors).toEqual([]);

@@ -11,7 +11,7 @@ The release service serves the static Astro build and exposes the current GitHub
 
 ## Configuration
 
-- `GITHUB_REPOSITORY` or `VOXELWEAVE_GITHUB_REPO` — `owner/name`, default `udbhavram/VoxelWeave`.
+- `GITHUB_REPOSITORY` or `VOXELWEAVE_GITHUB_REPO` — `owner/name`, default `udiram/VoxelWeave`.
 - `GITHUB_TOKEN` — optional server-only GitHub token for higher API limits; never exposed to the site.
 - `GITHUB_API_URL` — optional API base URL for GitHub-compatible testing, default `https://api.github.com`.
 - `GITHUB_CACHE_TTL_SECONDS` — in-memory cache TTL, default `60`.
