@@ -268,7 +268,37 @@ def _frame_records(
     rows = int(getattr(ds, "Rows", 0) or 0)
     columns = int(getattr(ds, "Columns", 0) or 0)
     if rows <= 0 or columns <= 0:
-        return [], np.empty((0, 0, 0), dtype=np.float32)
+        modality = _text(getattr(ds, "Modality", "")).upper()
+        image_type = _image_type(ds)
+        series_uid = _text(getattr(ds, "SeriesInstanceUID", "")) or "MISSING_SERIES"
+        source_uid = (
+            _text(getattr(ds, "SOPInstanceUID", ""))
+            or _text(getattr(getattr(ds, "file_meta", None), "MediaStorageSOPInstanceUID", ""))
+            or None
+        )
+        exclusion_reason = "non_ct_modality" if modality != "CT" else "non_image_object"
+        record = DicomInstance(
+            source_name=source_name,
+            frame_index=0,
+            series_uid=series_uid,
+            modality=modality,
+            rows=rows,
+            columns=columns,
+            position_lps=None,
+            orientation=None,
+            pixel_spacing=None,
+            slope=1.0,
+            intercept=0.0,
+            pixel_representation=None,
+            bits_stored=None,
+            image_type=image_type,
+            series_description=_text(getattr(ds, "SeriesDescription", "")),
+            sop_instance_uid=source_uid,
+            rescale_parameters_present=False,
+            eligible=False,
+            exclusion_reason=exclusion_reason,
+        )
+        return [record], np.empty((0, 0, 0), dtype=np.float32)
     if decode_pixels:
         if "PixelData" not in ds:
             return [], np.empty((0, 0, 0), dtype=np.float32)

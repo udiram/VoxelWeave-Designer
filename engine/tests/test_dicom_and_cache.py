@@ -129,3 +129,32 @@ def test_zip_and_explicit_file_sources_and_metadata_first_inspection(tmp_path: P
     loaded = load_dicom_series([files[0], files[1], files[2]])
     assert loaded.shape_zyx == (3, 4, 4)
     assert any(not value for value in calls)
+
+
+def test_metadata_only_dose_object_is_excluded_with_safe_summary(tmp_path: Path) -> None:
+    source_dir = tmp_path / "mixed-source"
+    write_synthetic_dicom_series(source_dir, shape_zyx=(3, 4, 4))
+    dose_path = source_dir / "dose-report.dcm"
+    dose = pydicom.dcmread(str(next(source_dir.glob("synthetic_*.dcm"))))
+    dose.Modality = "SR"
+    dose.SeriesInstanceUID = "2.25.123456789"
+    dose.SOPInstanceUID = "2.25.123456790"
+    del dose.PixelData
+    del dose.Rows
+    del dose.Columns
+    dose.save_as(str(dose_path))
+
+    inspection = inspect_dicom_source(source_dir)
+    assert inspection.eligible_series
+    excluded = [item for item in inspection.series if item.series_uid == "2.25.123456789"]
+    assert excluded and excluded[0].exclusion_reason == "non_ct_modality"
+    assert inspection.excluded_count >= 1
+    assert inspection.warnings
+    assert "PatientName" not in str(inspection.to_dict())
+
+    only_dose = tmp_path / "only-dose"
+    only_dose.mkdir()
+    dose.save_as(str(only_dose / "dose-report.dcm"))
+    only_inspection = inspect_dicom_source(only_dose)
+    assert not only_inspection.eligible_series
+    assert only_inspection.series[0].exclusion_reason == "non_ct_modality"
