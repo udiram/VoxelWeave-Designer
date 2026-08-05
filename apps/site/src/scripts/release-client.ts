@@ -155,7 +155,11 @@ const updateEvidence = (release: Release | null) => {
 };
 
 const updateDownloadCtas = (release: Release | null) => {
-  const appleArtifact = release?.artifacts?.find((artifact) => (artifact.architecture ?? '').toLowerCase().includes('apple silicon'));
+  const appleArtifacts = release?.artifacts?.filter((artifact) => (artifact.architecture ?? '').toLowerCase().includes('apple silicon')) ?? [];
+  const artifactName = (artifact: ReleaseArtifact) => (artifact.name ?? artifact.artifact ?? '').toLowerCase();
+  const appleArtifact = appleArtifacts.find((artifact) => artifactName(artifact).endsWith('.dmg'))
+    ?? appleArtifacts.find((artifact) => artifactName(artifact).endsWith('.app.zip'))
+    ?? appleArtifacts[0];
   const href = appleArtifact ? verifiedHref(appleArtifact.downloadPath) ?? verifiedHref(appleArtifact.url) : null;
   for (const cta of queryAll<HTMLAnchorElement>('[data-download-cta]')) {
     const releaseCta = cta.hasAttribute('data-release-download-cta');
