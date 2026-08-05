@@ -146,6 +146,7 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         ...state,
         calibrations: existing ? state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate) : [...state.calibrations, profile],
         selection: state.selection.calibrationId === profile.id ? { ...state.selection, calibrationId: profile.id } : state.selection,
+        toolpath: existing ? { ...state.toolpath, generated: false, audited: false, runId: undefined } : state.toolpath,
         ui: { ...state.ui, toast: profile.mismatch ? `Calibration imported; edit required: ${profile.mismatch}` : `Calibration profile ${profile.name || profile.id} is ready for review` },
       };
     }
@@ -153,7 +154,7 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const current = state.calibrations.find((candidate) => candidate.id === action.id);
       if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
       const profile = profileWithValidation({ ...current, ...action.patch, accepted: false }, false);
-      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate), ui: { ...state.ui, toast: profile.mismatch ? `Calibration needs review: ${profile.mismatch}` : "Calibration edits saved; accept the profile to bind it to generation" } };
+      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate), toolpath: { ...state.toolpath, generated: false, audited: false, runId: undefined }, ui: { ...state.ui, toast: profile.mismatch ? `Calibration needs review: ${profile.mismatch}` : "Calibration edits saved; accept the profile to bind it to generation" } };
     }
     case "ACCEPT_CALIBRATION_PROFILE": {
       const current = state.calibrations.find((candidate) => candidate.id === action.id);

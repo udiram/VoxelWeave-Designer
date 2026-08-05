@@ -39,6 +39,10 @@ describe("synthetic workflow state", () => {
     state = projectReducer(state, { type: "ACCEPT_CALIBRATION_PROFILE", id: profile.id });
     expect(state.calibrations[0].accepted).toBe(true);
     expect(state.selection.calibrationId).toBe(profile.id);
+    state = projectReducer(state, { type: "SET_TOOLPATH_GENERATED", runId: "native-run", estimate: state.toolpath.estimated });
+    expect(state.toolpath.generated).toBe(true);
+    state = projectReducer(state, { type: "UPDATE_CALIBRATION_PROFILE", id: profile.id, patch: { lot: "edited-lot" } });
+    expect(state.toolpath.generated).toBe(false);
     state = projectReducer(state, { type: "REVOKE_CALIBRATION_PROFILE", id: profile.id });
     expect(state.calibrations[0].accepted).toBe(false);
     expect(state.selection.calibrationId).toBeUndefined();
