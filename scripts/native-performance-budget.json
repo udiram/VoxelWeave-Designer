@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "voxelweave.native-performance-budget.v1",
+  "description": "Generous severe-regression gates for synthetic Apple Silicon sidecar qualification. Product targets are reported separately and are not silently converted into claims.",
+  "metrics": {
+    "launch_to_first_response_ms": {"target_ms": 2000, "gate_ms": 10000},
+    "inspect_dicom_source_first_progress_ms": {"target_ms": 250, "gate_ms": 5000},
+    "inspect_dicom_source_elapsed_ms": {"gate_ms": 30000},
+    "select_dicom_series_elapsed_ms": {"gate_ms": 30000},
+    "build_volume_cache_elapsed_ms": {"gate_ms": 60000},
+    "uncached_mpr_elapsed_ms": {"target_ms": 100, "gate_ms": 10000},
+    "request_volume_preview_elapsed_ms": {"gate_ms": 30000},
+    "create_print_selection_elapsed_ms": {"gate_ms": 30000},
+    "generate_toolpath_elapsed_ms": {"gate_ms": 120000},
+    "reverse_audit_gcode_elapsed_ms": {"gate_ms": 30000},
+    "export_run_package_elapsed_ms": {"gate_ms": 30000}
+  }
+}

@@ -30,3 +30,34 @@ These are measured release targets on the primary development Apple Silicon Mac,
 
 Performance diagnostics remain local and user-exportable. Severe regressions against representative fixtures block release or require an explicit documented exception.
 
+## Native qualification harness
+
+The release CI job runs `scripts/benchmark-sidecar.py` against the exact
+Apple-Silicon sidecar produced for the build. It creates a complete synthetic
+12 × 32 × 40 CT series through the current engine, then measures the JSONL
+operations used by the desktop adapter: DICOM inspection and selection, volume
+cache construction, an uncached MPR request, a volume preview, print selection,
+toolpath generation, reverse audit, and run-package export. One warmup and
+three measured iterations are recorded in `native-performance.json` with p50,
+p95, maximum, first-progress timing, and the host architecture.
+
+The brief's measured targets remain the product qualification targets. The
+harness reports whether the measurable proxies meet those targets, but only
+the intentionally generous severe-regression gates in
+`scripts/native-performance-budget.json` fail CI. The gates are not claims
+that a UI target was achieved. In particular, WebKit MPR scrolling, Three.js
+orbit FPS, geometry interaction FPS, and main-thread task duration are not
+measured by this sidecar harness and still require built-app profiling or
+Instruments evidence.
+
+Run a local native qualification on an Apple Silicon macOS host with:
+
+```sh
+python3 scripts/benchmark-sidecar.py \
+  --sidecar apps/desktop/src-tauri/resources/voxelweave-sidecar \
+  --output-dir /tmp/voxelweave-native-performance
+```
+
+The resulting JSON is local diagnostic evidence only. Synthetic timing does
+not establish performance for a clinical DICOM series, physical HU fidelity,
+or deposited width.
