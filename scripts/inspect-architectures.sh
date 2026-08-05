@@ -44,6 +44,10 @@ command -v "$file_bin" >/dev/null 2>&1 || {
   exit 1
 }
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+payload_inspector="${VOXELWEAVE_NATIVE_PAYLOAD_INSPECTOR:-$script_dir/inspect-native-payload.py}"
+payload_python="${VOXELWEAVE_NATIVE_PAYLOAD_PYTHON:-python3}"
+
 if ! command -v "$lipo_bin" >/dev/null 2>&1; then
   lipo_bin=""
 fi
@@ -101,6 +105,18 @@ for candidate in "${files[@]}"; do
     ((failures += 1))
   else
     echo "PASS $candidate :: architectures=arm64"
+    if [[ "$(basename "$candidate")" == "voxelweave-sidecar" ]]; then
+      if ! command -v "$payload_python" >/dev/null 2>&1; then
+        echo "FAIL $candidate :: payload inspector requires Python executable $payload_python" >&2
+        ((failures += 1))
+      elif [[ ! -x "$payload_inspector" ]]; then
+        echo "FAIL $candidate :: payload inspector is not executable: $payload_inspector" >&2
+        ((failures += 1))
+      elif ! "$payload_python" "$payload_inspector" --sidecar "$candidate"; then
+        echo "FAIL $candidate :: embedded PyInstaller native payload inspection failed" >&2
+        ((failures += 1))
+      fi
+    fi
   fi
 done
 
