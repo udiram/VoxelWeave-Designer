@@ -9,6 +9,7 @@ export const syntheticSource: DicomSource = {
   seriesUid: "2.25.7711044245865220291004331",
   name: "Chest CT · synthetic lung phantom",
   modality: "CT",
+  path: "synthetic://voxelweave/lung-phantom",
   sliceCount: 150,
   dimensions: { x: 512, y: 512, z: 150 },
   spacing: { x: 0.7, y: 0.7, z: 1 },
@@ -30,6 +31,8 @@ export const syntheticScene: SceneObject[] = [
     kind: "dicom",
     region: "measurement",
     tool: "T0",
+    sourcePath: syntheticSource.path,
+    dimensionsMm: { x: 358.4, y: 358.4, z: 150 },
     transform: {
       position: { x: 0, y: 0, z: 0 },
       rotation: { x: 0, y: 0, z: 0 },
@@ -128,6 +131,9 @@ export const syntheticProjectDocument: ProjectDocument = {
       z: [-37, 17],
     },
     scale: 1,
+    stride: 1,
+    tileThicknessMm: 0.4,
+    resamplingMethod: "trilinear",
     created: false,
   },
   calibrations: syntheticCalibrations,
@@ -162,6 +168,37 @@ export const syntheticProjectDocument: ProjectDocument = {
       registeredVoxels: 0,
     },
   },
+};
+
+/** Native mode starts empty; this object is never sent to the production sidecar. */
+export const emptyProjectDocument: ProjectDocument = {
+  ...structuredClone(syntheticProjectDocument),
+  projectId: "voxelweave-project",
+  name: "Untitled project",
+  savedAt: new Date(0).toISOString(),
+  source: {
+    ...structuredClone(syntheticSource),
+    path: undefined,
+    seriesUid: "",
+    name: "No DICOM source selected",
+    sliceCount: 0,
+    dimensions: { x: 0, y: 0, z: 0 },
+    spacing: { x: 0, y: 0, z: 0 },
+    huRange: { min: 0, max: 0 },
+    status: "needs-review",
+    cache: { ...structuredClone(syntheticSource.cache), identity: "" },
+  },
+  scene: [],
+  selection: {
+    ...structuredClone(syntheticProjectDocument.selection),
+    start: 0,
+    end: 0,
+    thicknessMm: 0,
+    crop: { x: [0, 0], y: [0, 0], z: [0, 0] },
+    outputDimensionsMm: { x: 0, y: 0, z: 0 },
+    created: false,
+  },
+  toolpath: { ...structuredClone(syntheticProjectDocument.toolpath), totalLayers: 0, selectedLayer: 0 },
 };
 
 export const projectDisplayDate = "04 Aug 2026 · 15:00";

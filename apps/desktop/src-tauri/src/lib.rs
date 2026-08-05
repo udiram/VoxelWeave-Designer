@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, RunEvent, State};
 
 const MAX_JSONL_BYTES: usize = 256 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
@@ -24,10 +24,63 @@ struct ManagedProcess {
     child: Arc<Mutex<Child>>,
 }
 
-#[derive(Default)]
 struct SidecarManager {
     process: Mutex<Option<ManagedProcess>>,
     pending: Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>>,
+    authorized_paths: Mutex<HashSet<PathBuf>>,
+    cache_paths: Mutex<HashSet<PathBuf>>,
+}
+
+impl Default for SidecarManager {
+    fn default() -> Self {
+        Self {
+            process: Mutex::new(None),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            authorized_paths: Mutex::new(HashSet::new()),
+            cache_paths: Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+fn canonical_existing(path: &PathBuf) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("selected paths must be absolute".to_string());
+    }
+    std::fs::canonicalize(path).map_err(|error| format!("cannot authorize {}: {error}", path.display()))
+}
+
+fn authorized_path(manager: &SidecarManager, requested: &str, allow_missing_target: bool) -> Result<PathBuf, String> {
+    let raw = PathBuf::from(requested);
+    if !raw.is_absolute() {
+        return Err("path must be absolute; choose it through the native dialog".to_string());
+    }
+    let canonical = if raw.exists() {
+        std::fs::canonicalize(&raw).map_err(|error| format!("cannot resolve {}: {error}", raw.display()))?
+    } else if allow_missing_target {
+        let parent = raw.parent().ok_or_else(|| "path has no parent directory".to_string())?;
+        let parent = std::fs::canonicalize(parent).map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
+        parent.join(raw.file_name().ok_or_else(|| "path has no file name".to_string())?)
+    } else {
+        return Err(format!("path does not exist: {}", raw.display()));
+    };
+    let guard = manager.authorized_paths.lock().map_err(|_| "authorized path state is poisoned".to_string())?;
+    if guard.iter().any(|root| canonical == *root || canonical.starts_with(root)) {
+        return Ok(canonical);
+    }
+    Err(format!("path is outside the user-authorized scope: {}", raw.display()))
+}
+
+fn authorize_path_impl(manager: &SidecarManager, path: &str) -> Result<String, String> {
+    let raw = PathBuf::from(path);
+    let canonical = if raw.exists() {
+        canonical_existing(&raw)?
+    } else {
+        let parent = raw.parent().ok_or_else(|| "path has no parent directory".to_string())?;
+        canonical_existing(&parent.to_path_buf())?
+    };
+    let mut guard = manager.authorized_paths.lock().map_err(|_| "authorized path state is poisoned".to_string())?;
+    guard.insert(canonical.clone());
+    Ok(raw.to_string_lossy().into_owned())
 }
 
 fn validate_bounded_value(value: &Value, depth: usize, location: &str) -> Result<(), String> {
@@ -126,11 +179,37 @@ fn validate_control_request(request: &Value) -> Result<(String, String), String>
     Ok((request_id, operation))
 }
 
+fn authorize_payload_paths(manager: &SidecarManager, value: &Value, location: &str) -> Result<(), String> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if let Some(path) = child.as_str() {
+                    if matches!(key.as_str(), "source" | "scan_back_source" | "source_path" | "sourcePath" | "directory" | "output_path") {
+                        if path.starts_with("synthetic://") {
+                            return Err("native sidecar rejects synthetic sources; choose a local path".to_string());
+                        }
+                        let allow_missing = matches!(key.as_str(), "directory" | "output_path");
+                        authorized_path(manager, path, allow_missing).map_err(|error| format!("{location}.{key}: {error}"))?;
+                    }
+                }
+                authorize_payload_paths(manager, child, &format!("{location}.{key}"))?;
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                authorize_payload_paths(manager, child, &format!("{location}[{index}]"))?;
+            }
+        }
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
 fn sidecar_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Ok(configured) = std::env::var("VOXELWEAVE_SIDECAR_PATH") {
         let path = PathBuf::from(configured);
         if path.is_file() {
-            return Ok(path);
+            return std::fs::canonicalize(&path).map_err(|error| format!("cannot resolve sidecar path: {error}"));
         }
         return Err(format!(
             "VOXELWEAVE_SIDECAR_PATH does not point to a file: {}",
@@ -324,6 +403,13 @@ fn sidecar_request(
     request: Value,
 ) -> Result<Value, String> {
     let (request_id, _operation) = validate_control_request(&request)?;
+    if let Some(payload) = request.get("payload") {
+        authorize_payload_paths(&state, payload, "payload")?;
+        if let Some(directory) = payload.get("directory").and_then(Value::as_str) {
+            let path = authorized_path(&state, directory, true)?;
+            if let Ok(mut cache_paths) = state.cache_paths.lock() { cache_paths.insert(path); }
+        }
+    }
     let process = ensure_process(&app, &state)?;
     let (sender, receiver) = mpsc::channel();
     {
@@ -355,8 +441,13 @@ fn sidecar_request(
 }
 
 #[tauri::command]
-fn save_voxelweave_document(path: String, document: Value) -> Result<(), String> {
-    let target = PathBuf::from(path);
+fn authorize_path(state: State<'_, SidecarManager>, path: String) -> Result<String, String> {
+    authorize_path_impl(&state, &path)
+}
+
+#[tauri::command]
+fn save_voxelweave_document(state: State<'_, SidecarManager>, path: String, document: Value) -> Result<(), String> {
+    let target = authorized_path(&state, &path, true)?;
     if target.extension().and_then(|value| value.to_str()) != Some("voxelweave") {
         return Err("project documents must use the .voxelweave extension".to_string());
     }
@@ -371,8 +462,8 @@ fn save_voxelweave_document(path: String, document: Value) -> Result<(), String>
 }
 
 #[tauri::command]
-fn open_voxelweave_document(path: String) -> Result<Value, String> {
-    let target = PathBuf::from(path);
+fn open_voxelweave_document(state: State<'_, SidecarManager>, path: String) -> Result<Value, String> {
+    let target = authorized_path(&state, &path, false)?;
     if target.extension().and_then(|value| value.to_str()) != Some("voxelweave") {
         return Err("project documents must use the .voxelweave extension".to_string());
     }
@@ -389,8 +480,7 @@ fn open_voxelweave_document(path: String) -> Result<Value, String> {
     Ok(document)
 }
 
-#[tauri::command]
-fn sidecar_shutdown(state: State<'_, SidecarManager>) -> Result<(), String> {
+fn shutdown_sidecar_process(state: &SidecarManager) -> Result<(), String> {
     let mut process = state
         .process
         .lock()
@@ -401,21 +491,41 @@ fn sidecar_shutdown(state: State<'_, SidecarManager>) -> Result<(), String> {
             let _ = child.wait();
         }
     }
+    let cache_paths = state.cache_paths.lock().map_err(|_| "cache path state is poisoned".to_string())?.drain().collect::<Vec<_>>();
+    for path in cache_paths {
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else if path.is_file() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     Ok(())
+}
+
+#[tauri::command]
+fn sidecar_shutdown(state: State<'_, SidecarManager>) -> Result<(), String> {
+    shutdown_sidecar_process(&state)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(SidecarManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             sidecar_request,
             sidecar_shutdown,
+            authorize_path,
             save_voxelweave_document,
             open_voxelweave_document
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running VoxelWeave Designer");
+        .build(tauri::generate_context!())
+        .expect("error while building VoxelWeave Designer");
+    app.run(|app_handle, event| {
+        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+            let state = app_handle.state::<SidecarManager>();
+            let _ = shutdown_sidecar_process(&state);
+        }
+    });
 }

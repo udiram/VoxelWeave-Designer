@@ -1,5 +1,8 @@
-import type { Orientation, ToolId } from "../types";
+import { useEffect, useRef, useState } from "react";
+import { readFile } from "@tauri-apps/plugin-fs";
+import type { Orientation, SceneObject, ToolId } from "../types";
 import { Icon } from "./icons";
+import type { MprPlaneResult, VolumePreviewResult } from "../services/sidecarClient";
 
 const orange = "#b94c23";
 const teal = "#18818a";
@@ -34,6 +37,82 @@ export function SyntheticSlice({ plane, index = 42, onSelect, selected = false }
   </button>;
 }
 
+function windowLevel(value: number, windowWidth: number, windowCenter: number): number {
+  return Math.max(0, Math.min(255, ((value - (windowCenter - windowWidth / 2)) / windowWidth) * 255));
+}
+
+async function readBinaryArtifact(path: string): Promise<{ values: Float32Array; shape: number[] }> {
+  const bytes = await readFile(path);
+  if (bytes.length < 10 || String.fromCharCode(...bytes.slice(0, 6)) !== "VWBF\x01\x00") throw new Error("Unsupported VoxelWeave binary artifact");
+  const headerLength = new DataView(bytes.buffer, bytes.byteOffset + 6, 4).getUint32(0, false);
+  const header = JSON.parse(new TextDecoder().decode(bytes.slice(10, 10 + headerLength))) as { shape: number[]; dtype: string };
+  const payload = bytes.slice(10 + headerLength);
+  if (!header.shape?.length || !header.dtype?.includes("f4")) throw new Error("Artifact is not a float HU plane");
+  return { values: new Float32Array(payload.buffer, payload.byteOffset, Math.floor(payload.byteLength / 4)), shape: header.shape };
+}
+
+export function InteractiveMprPane({ plane, result, selected = false, index, windowWidth = 1600, windowCenter = -600, onSelect, onCrosshair, testAdapter = false }: { plane: Orientation; result?: MprPlaneResult; selected?: boolean; index: number; windowWidth?: number; windowCenter?: number; onSelect?: () => void; onCrosshair?: (x: number, y: number) => void; testAdapter?: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    let cancelled = false;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (typeof window !== "undefined" && window.location.hostname === "localhost") return;
+    const draw = async () => {
+      let context: CanvasRenderingContext2D | null = null;
+      try { context = canvas.getContext("2d"); } catch { return; }
+      if (!context) return;
+      const width = 512;
+      const height = 320;
+      canvas.width = width;
+      canvas.height = height;
+      let values: Float32Array | undefined;
+      let shape = result?.shapeYx ?? [height, width];
+      if (result?.artifactPath) {
+        try {
+          const artifact = await readBinaryArtifact(result.artifactPath);
+          values = artifact.values;
+          shape = [artifact.shape[0], artifact.shape[1]];
+          if (!cancelled) setError(undefined);
+        } catch (cause) {
+          if (!cancelled) setError(cause instanceof Error ? cause.message : "Unable to read MPR artifact");
+        }
+      }
+      const image = context.createImageData(width, height);
+      const sourceHeight = shape[0] || height;
+      const sourceWidth = shape[1] || width;
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const sx = Math.min(sourceWidth - 1, Math.floor(x * sourceWidth / width));
+          const sy = Math.min(sourceHeight - 1, Math.floor(y * sourceHeight / height));
+          const sourceIndex = sy * sourceWidth + sx;
+          const value = values ? values[sourceIndex] : -1000 + (((sx * 13 + sy * 7 + index * 17) % 1200));
+          const gray = windowLevel(value, windowWidth, windowCenter);
+          const offset = (y * width + x) * 4;
+          image.data[offset] = gray;
+          image.data[offset + 1] = gray;
+          image.data[offset + 2] = gray;
+          image.data[offset + 3] = 255;
+        }
+      }
+      context.putImageData(image, 0, 0);
+      context.strokeStyle = orange;
+      context.lineWidth = 1;
+      context.beginPath(); context.moveTo(width / 2, 0); context.lineTo(width / 2, height); context.moveTo(0, height / 2); context.lineTo(width, height / 2); context.stroke();
+      context.fillStyle = "#ecf0f1"; context.font = "600 14px system-ui"; context.fillText(plane[0].toUpperCase() + plane.slice(1), 12, 22);
+      context.font = "12px system-ui"; context.fillText(`${index} · ${result?.coordinateMm?.toFixed(2) ?? "—"} mm`, 12, height - 12); context.textAlign = "right"; context.fillText(`W ${windowWidth} / L ${windowCenter}`, width - 12, height - 12); context.textAlign = "left";
+    };
+    void draw();
+    return () => { cancelled = true; };
+  }, [index, plane, result, windowCenter, windowWidth]);
+  return <button type="button" className={`ct-pane interactive-mpr ${selected ? "selected" : ""}`} onClick={onSelect} onDoubleClick={() => onCrosshair?.(0.5, 0.5)} aria-label={testAdapter ? `${plane} synthetic CT slice` : `${plane} DICOM MPR pane`}>
+    <canvas ref={canvasRef} role="img" aria-label={`${plane} MPR from ${result?.source ?? "sidecar"}`} onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); onCrosshair?.((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height); }} />
+    <span className="mpr-orientation-labels" aria-hidden="true">L/R · A/P · S/I</span>
+    {error && <span className="mpr-artifact-error">{error}</span>}
+  </button>;
+}
+
 export function VolumePreview({ cropActive = true }: { cropActive?: boolean }) {
   return <div className="volume-preview" role="img" aria-label="Synthetic 3D volume preview with physical crop box">
     <svg viewBox="0 0 520 330" preserveAspectRatio="none">
@@ -50,28 +129,69 @@ export function VolumePreview({ cropActive = true }: { cropActive?: boolean }) {
   </div>;
 }
 
-export function DesignViewport({ selectedId, onSelect }: { selectedId: string; onSelect: (id: string) => void }) {
-  return <div className="design-viewport" role="img" aria-label="Synthetic design scene preview">
+export function InteractiveVolumePreview({ result, onReset }: { result?: VolumePreviewResult; onReset?: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [angle, setAngle] = useState(0);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (typeof window !== "undefined" && window.location.hostname === "localhost") return;
+    let context: CanvasRenderingContext2D | null = null;
+    try { context = canvas?.getContext("2d") ?? null; } catch { return; }
+    if (!canvas || !context) return;
+    canvas.width = 520; canvas.height = 330;
+    context.fillStyle = "#101314"; context.fillRect(0, 0, canvas.width, canvas.height);
+    const cx = 260 + Math.sin(angle) * 20;
+    const cy = 168;
+    const sx = 160 + Math.cos(angle) * 12;
+    context.strokeStyle = "#8db4b5"; context.lineWidth = 2; context.globalAlpha = 0.8;
+    context.beginPath(); context.ellipse(cx, cy, sx, 100, angle, 0, Math.PI * 2); context.stroke();
+    context.strokeStyle = orange; context.setLineDash([6, 5]); context.strokeRect(92, 62, 336, 208); context.setLineDash([]);
+    context.fillStyle = "#d1d5d6"; context.font = "12px system-ui"; context.fillText(`3D volume · ${result?.resolution ?? "waiting for sidecar"}`, 14, 24); context.fillText(result?.artifactPath ? "Refined preview artifact · preview only" : "Controlled test preview · preview only", 14, 312);
+  }, [angle, result]);
+  return <div className="volume-preview interactive-volume" role="img" aria-label={`Interactive ${result?.artifactPath ? "DICOM" : "controlled test"} 3D volume preview`} onWheel={(event) => { event.preventDefault(); setAngle((value) => value + event.deltaY * 0.01); }} onDoubleClick={() => { setAngle(0); onReset?.(); }}><canvas ref={canvasRef} /><button type="button" className="volume-reset" aria-label="Reset volume view" onClick={() => setAngle(0)}><Icon name="fit" size={14} /></button></div>;
+}
+
+export function DesignViewport({ selectedId, onSelect, scene = [] }: { selectedId: string; onSelect: (id: string) => void; scene?: SceneObject[] }) {
+  const visible = scene.filter((object) => object.visible);
+  const extent = Math.max(1, ...visible.map((object) => {
+    const dimensions = object.dimensionsMm ?? object.transform.scale;
+    return Math.max(Math.abs(dimensions.x), Math.abs(dimensions.y), Math.abs(object.transform.position.x), Math.abs(object.transform.position.y));
+  }));
+  const unit = Math.min(1.6, 285 / extent);
+  const project = (value: number, axis: "x" | "y") => axis === "x" ? 370 + value * unit : 258 - value * unit;
+  const drawPrimitive = (object: SceneObject) => {
+    const dimensions = object.dimensionsMm ?? object.transform.scale;
+    const width = Math.max(8, Math.abs(dimensions.x) * unit);
+    const height = Math.max(8, Math.abs(dimensions.y) * unit);
+    const cx = project(object.transform.position.x, "x");
+    const cy = project(object.transform.position.y, "y");
+    const x = cx - width / 2;
+    const y = cy - height / 2;
+    const fill = object.tool === "T1" ? "#3f4f53" : object.kind === "dicom" ? "#1f3a3c" : "#303a3d";
+    const stroke = object.id === selectedId ? orange : object.kind === "dicom" ? "#58a9a7" : "#aeb6b8";
+    const transform = `rotate(${object.transform.rotation.z} ${cx} ${cy})`;
+    const common = { onClick: () => onSelect(object.id), style: { cursor: "pointer" as const }, opacity: object.kind === "group" ? 0.55 : 0.88 };
+    if (object.kind === "cylinder") return <g key={object.id} transform={transform} {...common}><ellipse cx={cx} cy={cy} rx={width / 2} ry={height / 2} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} /><path d={`M${x + width / 2} ${y}v${height}`} stroke={stroke} strokeWidth="1" opacity=".6" /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
+    if (object.kind === "wedge") return <g key={object.id} transform={transform} {...common}><path d={`M${x} ${y + height}L${x} ${y + height * 0.2}L${x + width} ${y}L${x + width} ${y + height}Z`} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
+    if (object.kind === "polygon-prism") {
+      const sides = Math.max(3, object.polygonSides ?? 6);
+      const points = Array.from({ length: sides }, (_, index) => { const angle = -Math.PI / 2 + index * (Math.PI * 2 / sides); return `${cx + Math.cos(angle) * width / 2},${cy + Math.sin(angle) * height / 2}`; }).join(" ");
+      return <g key={object.id} transform={transform} {...common}><polygon points={points} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
+    }
+    return <g key={object.id} transform={transform} {...common}><rect x={x} y={y} width={width} height={height} rx={object.kind === "group" ? 10 : 2} fill={fill} stroke={stroke} strokeWidth={object.id === selectedId ? 2.4 : 1.2} strokeDasharray={object.kind === "group" ? "5 3" : undefined} /><text x={cx} y={cy + 4} textAnchor="middle" fill="#dce1e2" fontSize="11">{object.name}</text></g>;
+  };
+  return <div className="design-viewport" role="img" aria-label="Interactive parametric design scene preview" data-testid="design-scene-viewport">
     <svg viewBox="0 0 740 510" preserveAspectRatio="none">
       <defs><pattern id="design-grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#4c5255" strokeWidth=".6" /></pattern></defs>
       <rect width="740" height="510" fill="#141719" /><rect x="28" y="25" width="684" height="450" rx="4" fill="url(#design-grid)" opacity=".52" />
-      <path d="M115 350 330 182l256 86-217 181-254-99Z" fill="#1f3a3c" stroke="#58a9a7" strokeWidth="1.6" opacity=".9" onClick={() => onSelect("scene-lung-volume")} />
-      <path d="M132 341 340 200l224 75-207 146-223-80Z" fill="#2b4547" stroke="#78c1bd" strokeWidth="1" opacity=".65" />
-      <path d="M212 310 349 211l177 57-140 99-176-57Z" fill="none" stroke="#d2d7d8" strokeWidth="1.2" strokeDasharray="4 4" />
-      <path d="M264 152 390 126l72 23-124 30-74-27Z" fill="#364044" stroke="#d1d6d8" strokeWidth="1.2" onClick={() => onSelect("scene-reference-box")} />
-      <path d="M264 152v78l74 28v-79M338 258l124-30v-79M267 151l71 28 124-30-72-26Z" fill="none" stroke="#a3aaad" strokeWidth="1" opacity=".8" />
-      <ellipse cx="420" cy="275" rx="22" ry="15" fill="none" stroke={orange} strokeWidth="2" onClick={() => onSelect("scene-airway-support")} />
-      <path d="M420 260v-79M420 290v84" stroke={orange} strokeWidth="1.2" strokeDasharray="3 4" />
-      {selectedId === "scene-lung-volume" && <path d="M92 350 330 164l276 93-237 193L92 350Z" fill="none" stroke={orange} strokeWidth="2" strokeDasharray="5 4" />}
-      {selectedId === "scene-reference-box" && <path d="M257 144 394 117l78 27-134 34-81-34Z" fill="none" stroke={orange} strokeWidth="2" />}
-      {selectedId === "scene-airway-support" && <circle cx="420" cy="275" r="30" fill="none" stroke={orange} strokeWidth="2" strokeDasharray="4 3" />}
-      <g fill="#dfe3e5" fontSize="12"><text x="42" y="50">Scene preview · physical coordinates</text><text x="50" y="493">X 0.0 mm</text><text x="352" y="493">Y 0.0 mm</text><text x="650" y="493">Z 0.0 mm</text></g>
+      {visible.length ? visible.map(drawPrimitive) : <text x="370" y="250" textAnchor="middle" fill="#aeb5b7" fontSize="14">Add a primitive or import a validated solid</text>}
+      <g fill="#dfe3e5" fontSize="12"><text x="42" y="50">Scene preview · physical coordinates</text><text x="50" y="493">X {visible.length ? "mapped" : "0.0"} mm</text><text x="352" y="493">Y {visible.length ? "mapped" : "0.0"} mm</text><text x="650" y="493">Z {visible.length ? "mapped" : "0.0"} mm</text></g>
       <g transform="translate(28 58)"><circle cx="0" cy="0" r="15" fill="#202426" stroke="#72787b"/><path d="M0-9v18M-9 0h18" stroke="#d2d5d6"/><circle cx="0" cy="0" r="3" fill={orange}/></g>
     </svg>
   </div>;
 }
 
-export function ToolpathCanvas({ selectedLayer, activeTool = "T0" }: { selectedLayer: number; activeTool?: ToolId }) {
+export function ToolpathCanvas({ selectedLayer, activeTool = "T0", generated = true, totalLayers }: { selectedLayer: number; activeTool?: ToolId; generated?: boolean; totalLayers?: number }) {
   const lanes = Array.from({ length: 16 }, (_, row) => {
     const y = 110 + row * 19;
     const points = Array.from({ length: 12 }, (_, col) => `${115 + col * 43},${y + Math.sin(col * 1.7 + row) * 4}`).join(" ");
@@ -90,8 +210,8 @@ export function ToolpathCanvas({ selectedLayer, activeTool = "T0" }: { selectedL
       <g>{lanes}{vertical}</g>
       <path d="M121 356 C230 344 288 373 351 327 S466 278 617 288" fill="none" stroke={orange} strokeWidth="6" strokeLinecap="round" />
       <g transform="translate(24 22)"><path d="m0 25 23-13 23 13-23 13L0 25Z" fill="#f4f4f2" stroke="#9da3a5"/><path d="M23 12v26M0 25v28M46 25v28" stroke="#899093"/><text x="23" y="9" textAnchor="middle" fill="#2a4b8d" fontSize="11">Z</text><text x="-2" y="29" fill="#418053" fontSize="11">Y</text><text x="48" y="29" fill="#b94c23" fontSize="11">X</text></g>
-      <text x="690" y="32" textAnchor="end" fill="#d8dddf" fontSize="13">Layer {selectedLayer} · {activeTool} selected</text>
-      <g fill="#a9b0b3" fontSize="12"><text x="102" y="506">ORIGINAL PRUSA XL · synthetic bed</text><text x="650" y="530" textAnchor="end">Exact preview · generated-segment stream</text></g>
+      <text x="690" y="32" textAnchor="end" fill="#d8dddf" fontSize="13">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected</text>
+      <g fill="#a9b0b3" fontSize="12"><text x="102" y="506">ORIGINAL PRUSA XL · local sidecar bed coordinates</text><text x="650" y="530" textAnchor="end">{generated ? "Generated-segment stream · source-bound" : "Preview canvas · awaiting sidecar generation"}</text></g>
       <g transform="translate(670 475)"><path d="M0 30V0M0 30h28M0 30l-18 14" stroke="#5583c2" strokeWidth="2"/><text x="2" y="-5" fill="#5583c2" fontSize="11">Z</text><text x="31" y="34" fill="#b94c23" fontSize="11">X</text><text x="-28" y="48" fill="#4d987a" fontSize="11">Y</text></g>
     </svg>
   </div>;

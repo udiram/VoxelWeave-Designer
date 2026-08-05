@@ -4,6 +4,15 @@ import { PROJECT_SCHEMA_VERSION, type ProjectDocument } from "../types";
 const PROJECT_STORAGE_KEY = "voxelweave.project.v1";
 const RECOVERY_STORAGE_KEY = "voxelweave.project.recovery.v1";
 
+export function isNativeRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function authorizeNativePath(path: string): Promise<void> {
+  if (!isNativeRuntime()) return;
+  await invoke("authorize_path", { path });
+}
+
 export function serializeProject(project: ProjectDocument): string {
   return JSON.stringify({ ...project, schemaVersion: PROJECT_SCHEMA_VERSION });
 }
@@ -49,10 +58,12 @@ export function clearProjectStorage(storage: Storage = window.localStorage): voi
 }
 
 export async function saveNativeProject(path: string, project: ProjectDocument): Promise<void> {
+  await authorizeNativePath(path);
   await invoke("save_voxelweave_document", { path, document: JSON.parse(serializeProject(project)) as ProjectDocument });
 }
 
 export async function openNativeProject(path: string): Promise<ProjectDocument> {
+  await authorizeNativePath(path);
   const document = await invoke<unknown>("open_voxelweave_document", { path });
   return migrateProject(document);
 }

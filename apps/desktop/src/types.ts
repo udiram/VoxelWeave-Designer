@@ -21,7 +21,7 @@ export interface Bounds3D {
 export interface SceneObject {
   id: string;
   name: string;
-  kind: "box" | "cylinder" | "wedge" | "dicom" | "fixture";
+  kind: "box" | "cylinder" | "wedge" | "polygon-prism" | "extrusion" | "dicom" | "fixture" | "group";
   region: "measurement" | "support" | "fixture";
   tool: ToolId;
   transform: {
@@ -29,6 +29,11 @@ export interface SceneObject {
     rotation: Vec3;
     scale: Vec3;
   };
+  dimensionsMm?: Vec3;
+  polygonSides?: number;
+  polygonPoints?: Array<{ x: number; y: number }>;
+  boolean?: { operation: "union" | "subtract" | "intersect"; operands: string[] };
+  sourcePath?: string;
   visible: boolean;
 }
 
@@ -36,10 +41,17 @@ export interface DicomSource {
   seriesUid: string;
   name: string;
   modality: "CT";
+  /** Absolute path selected by the user. Raw DICOM is never persisted in the document. */
+  path?: string;
+  /** Hash of the selected source metadata/files, supplied by the sidecar. */
+  sourceHash?: string;
+  seriesCandidates?: DicomSeriesCandidate[];
   sliceCount: number;
   dimensions: { x: number; y: number; z: number };
   spacing: Vec3;
   origin: Vec3;
+  /** Direction cosine matrix (LPS rows, source x/y/z columns) from the sidecar volume header. */
+  directionLps?: number[][];
   orientation: string;
   huRange: { min: number; max: number };
   status: "ready" | "needs-review";
@@ -47,7 +59,21 @@ export interface DicomSource {
     scientificSource: "full-resolution signed-HU cache";
     preview: "256³ refined";
     identity: string;
+    directory?: string;
+    volumePath?: string;
+    previewPath?: string;
   };
+}
+
+export interface DicomSeriesCandidate {
+  seriesUid: string;
+  name: string;
+  modality: string;
+  sliceCount: number;
+  dimensions?: { x: number; y: number; z: number };
+  spacing?: Vec3;
+  status: "eligible" | "needs-review" | "excluded";
+  warnings: string[];
 }
 
 export interface CropBounds {
@@ -65,6 +91,12 @@ export interface PrintSelection {
   outputMode: OutputMode;
   crop: CropBounds;
   scale: number;
+  stride: number;
+  tileThicknessMm?: number;
+  outputDimensionsMm?: Vec3;
+  sourceToPrintTransform?: number[];
+  resamplingMethod?: "trilinear" | "nearest";
+  calibrationId?: string;
   created: boolean;
 }
 
@@ -118,9 +150,12 @@ export interface VerifyState {
   reportExported: boolean;
   comparison: {
     meanAbsoluteHu: number;
-    p95AbsoluteHu: number;
+    p95AbsoluteHu?: number;
+    rmseHu?: number;
     registeredVoxels: number;
   };
+  sourcePath?: string;
+  reportPath?: string;
 }
 
 export interface ProjectDocument {
@@ -144,6 +179,7 @@ export interface ProjectUiState {
   toast: string;
   autosaveState: "saved" | "saving" | "recovered";
   lastSavedAt: string | null;
+  filePath?: string;
 }
 
 export interface ProjectState extends ProjectDocument {
@@ -152,25 +188,31 @@ export interface ProjectState extends ProjectDocument {
 
 export type ProjectAction =
   | { type: "OPEN_SYNTHETIC_PROJECT" }
+  | { type: "OPEN_PROJECT"; project: ProjectDocument; path?: string }
+  | { type: "SET_PROJECT_PATH"; path?: string }
   | { type: "SET_WORKSPACE"; workspace: WorkspaceId }
   | { type: "SET_SELECTED_PANE"; pane: ProjectUiState["selectedPane"] }
   | { type: "SET_SELECTION"; patch: Partial<PrintSelection> }
+  | { type: "SET_DICOM_SOURCE"; source: DicomSource }
   | { type: "CREATE_PRINT_SELECTION" }
   | { type: "REVIEW_CALIBRATION"; profileId: string }
   | { type: "ACKNOWLEDGE_CLIPPING" }
-  | { type: "SET_TOOLPATH_GENERATED"; runId: string; estimate: ToolpathState["estimated"] }
+  | { type: "SET_TOOLPATH_GENERATED"; runId: string; estimate: ToolpathState["estimated"]; clippingPercent?: number }
   | { type: "SET_LAYER"; layer: number }
   | { type: "GENERATE_AUDITED_GCODE" }
-  | { type: "EXPORT_RUN_PACKAGE" }
-  | { type: "IMPORT_SCAN_BACK" }
+  | { type: "EXPORT_RUN_PACKAGE"; packageName?: string; exportHash?: string }
+  | { type: "IMPORT_SCAN_BACK"; sourcePath?: string; evidenceName?: string; result?: VerifyScanBackResult }
   | { type: "SET_COMPARISON_MODE"; mode: ComparisonMode }
   | { type: "SET_REGISTRATION"; method: VerifyState["registrationMethod"]; confidence: VerifyState["confidence"] }
-  | { type: "EXPORT_REPORT" }
+  | { type: "EXPORT_REPORT"; reportPath?: string }
   | { type: "SET_SCENE_SELECTION"; id: string }
   | { type: "SET_SCENE_TRANSFORM"; id: string; transform: Partial<SceneObject["transform"]> }
+  | { type: "SET_SCENE_DIMENSIONS"; id: string; dimensionsMm: Vec3 }
   | { type: "SET_SCENE_OWNERSHIP"; id: string; region?: SceneObject["region"]; tool?: ToolId }
   | { type: "TOGGLE_SCENE_VISIBILITY"; id: string }
   | { type: "ADD_PRIMITIVE"; kind: SceneObject["kind"] }
+  | { type: "BOOLEAN_SCENE"; operation: "union" | "subtract" | "intersect"; operandIds: string[] }
+  | { type: "IMPORT_SOLID"; path: string; format: "stl" | "3mf" }
   | { type: "SET_TOAST"; message: string }
   | { type: "CLEAR_TOAST" };
 

@@ -20,7 +20,9 @@
         "resizable": true
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.local; connect-src 'self' ipc: http://ipc.local; img-src 'self' asset: https://asset.local blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:"
+    }
   },
   "bundle": {
     "active": true,
