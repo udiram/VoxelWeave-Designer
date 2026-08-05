@@ -38,16 +38,9 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def load_signing_status(path: Path | None, channel: str) -> dict[str, Any]:
     if path is None:
-        if channel == "stable":
-            raise ValueError("stable evidence requires a signing status file")
-        return {
-            "status": "development-prerelease-not-notarized",
-            "signed": False,
-            "notarized": False,
-            "notarizationStatus": "not-performed",
-        }
+        raise ValueError(f"{channel} evidence requires a signing status file")
     status = read_json(path)
-    required = ("status", "signed", "notarized", "notarizationStatus")
+    required = ("status", "signed", "notarized", "notarizationStatus", "signatureType")
     missing = [key for key in required if key not in status]
     if missing:
         raise ValueError(f"signing status is missing: {', '.join(missing)}")
@@ -56,6 +49,7 @@ def load_signing_status(path: Path | None, channel: str) -> dict[str, Any]:
         "signed": bool(status["signed"]),
         "notarized": bool(status["notarized"]),
         "notarizationStatus": status["notarizationStatus"],
+        "signatureType": status["signatureType"],
     }
 
 

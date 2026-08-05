@@ -43,10 +43,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
             status.write_text(
                 json.dumps(
                     {
-                        "status": "development-prerelease-not-notarized",
-                        "signed": False,
+                        "status": "development-prerelease-adhoc-sealed-not-notarized",
+                        "signed": True,
                         "notarized": False,
                         "notarizationStatus": "not-performed",
+                        "signatureType": "ad-hoc",
                     }
                 ),
                 encoding="utf-8",
@@ -93,10 +94,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
             status.write_text(
                 json.dumps(
                     {
-                        "status": "development-prerelease-not-notarized",
-                        "signed": False,
+                        "status": "development-prerelease-adhoc-sealed-not-notarized",
+                        "signed": True,
                         "notarized": False,
                         "notarizationStatus": "not-performed",
+                        "signatureType": "ad-hoc",
                     }
                 ),
                 encoding="utf-8",

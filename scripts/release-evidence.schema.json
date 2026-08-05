@@ -109,14 +109,15 @@
     "signing": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "signed", "notarized", "notarizationStatus"],
+      "required": ["status", "signed", "notarized", "notarizationStatus", "signatureType"],
       "properties": {
         "status": {
-          "enum": ["signed-and-notarized", "development-prerelease-not-notarized"]
+          "enum": ["signed-and-notarized", "development-prerelease-adhoc-sealed-not-notarized"]
         },
         "signed": {"type": "boolean"},
         "notarized": {"type": "boolean"},
-        "notarizationStatus": {"enum": ["accepted", "not-performed"]}
+        "notarizationStatus": {"enum": ["accepted", "not-performed"]},
+        "signatureType": {"enum": ["developer-id", "ad-hoc"]}
       }
     }
   }

@@ -51,7 +51,7 @@ The build helper refuses a missing desktop workspace, missing Tauri configuratio
 
 Stable release signing uses a temporary CI keychain, Developer ID Application signing, a freshly rebuilt DMG containing the signed app, App Store Connect notarization, stapling, and local validation. Missing credentials or failed Apple validation stops the stable path.
 
-Development prereleases are explicitly recorded as not notarized. They must not be described as notarized, validated for clinical use, or physically validated. See [release operations](../RELEASE.md) for the credential names and evidence flow.
+Development prereleases receive a verified ad-hoc bundle seal so their nested code and resources pass strict integrity verification. They are explicitly recorded as not Developer ID-signed or notarized and must not be described as Gatekeeper-trusted, validated for clinical use, or physically validated. See [release operations](../RELEASE.md) for the credential names and evidence flow.
 
 ## Runtime assumptions
 

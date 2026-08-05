@@ -88,7 +88,7 @@ test('mocked release renders artifact receipt, checks, checksum, and verified do
   await expect(row.locator('code')).toHaveText('a'.repeat(64));
   await expect(row.getByRole('link', { name: /Download VoxelWeave/ })).toHaveAttribute('href', '/download/development-12/VoxelWeave-Designer-arm64.dmg');
   await expect(page.locator('[data-release-tag]')).toHaveText('development-12');
-  await expect(page.locator('[data-release-channel]')).toContainText('Development prerelease · not signed or notarized');
+  await expect(page.locator('[data-release-channel]')).toContainText('Development prerelease · ad-hoc integrity seal · not Developer ID-signed or notarized');
   await expect(page.locator('[data-check-id="release-checksum"]')).toHaveAttribute('data-status', 'reported');
   await expect(page.locator('[data-download-cta]').first()).toHaveAttribute('href', '/download/development-12/VoxelWeave-Designer-arm64.dmg');
   await expect(page.locator('[data-download-cta]').first()).toContainText('Download development build');

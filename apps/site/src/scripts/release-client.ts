@@ -202,7 +202,7 @@ const renderRelease = (release: Release) => {
     channel.hidden = false;
     channel.dataset.channel = development ? 'development-prerelease' : 'stable';
     channel.textContent = development
-      ? 'Development prerelease · not signed or notarized · controlled testing only'
+      ? 'Development prerelease · ad-hoc integrity seal · not Developer ID-signed or notarized · controlled testing only'
       : 'Stable release · signed and notarized';
   }
   if (sourceRevision) sourceRevision.textContent = release.sourceRevision ?? 'Not reported';

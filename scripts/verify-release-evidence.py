@@ -331,7 +331,7 @@ def verify_manifest(schema_path: Path, manifest_path: Path, artifact_root: Path)
             errors.append("verification.packaging must report that the app and DMG were built")
 
     signing = manifest.get("signing")
-    check_required(signing, ("status", "signed", "notarized", "notarizationStatus"), "signing", errors)
+    check_required(signing, ("status", "signed", "notarized", "notarizationStatus", "signatureType"), "signing", errors)
     channel = release.get("channel") if isinstance(release, dict) else None
     if isinstance(signing, dict):
         if not isinstance(signing.get("signed"), bool) or not isinstance(signing.get("notarized"), bool):
@@ -343,9 +343,13 @@ def verify_manifest(schema_path: Path, manifest_path: Path, artifact_root: Path)
                 errors.append("stable releases require signed=true and notarized=true")
             if signing.get("notarizationStatus") != "accepted":
                 errors.append("stable releases require notarizationStatus=accepted")
+            if signing.get("signatureType") != "developer-id":
+                errors.append("stable releases require signatureType=developer-id")
         elif channel == "development-prerelease":
-            if signing.get("status") != "development-prerelease-not-notarized":
+            if signing.get("status") != "development-prerelease-adhoc-sealed-not-notarized":
                 errors.append("development-prerelease signing.status must be explicit")
+            if signing.get("signed") is not True or signing.get("signatureType") != "ad-hoc":
+                errors.append("development-prerelease releases require a verified ad-hoc bundle seal")
             if signing.get("notarized") is not False or signing.get("notarizationStatus") != "not-performed":
                 errors.append("development-prerelease releases must not claim notarization")
 

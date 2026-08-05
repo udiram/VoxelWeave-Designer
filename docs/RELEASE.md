@@ -7,7 +7,7 @@ VoxelWeave releases are Apple Silicon macOS artifacts with evidence attached. A 
 | Lane | Trigger | Signing contract | Public meaning |
 | --- | --- | --- | --- |
 | `stable` | `v*.*.*` tag | Developer ID signing, Apple notarization, stapler validation, and `spctl` must pass | Public release candidate for supported Apple Silicon macOS 14+ users |
-| `development-prerelease` | Manual workflow dispatch | Signing/notarization is recorded as not performed | Development artifact; not notarized and not a clinical or physical-validation claim |
+| `development-prerelease` | Manual workflow dispatch | Nested Mach-O files and the app bundle receive a verified ad-hoc integrity seal; Developer ID signing/notarization is recorded as not performed | Development artifact; not Gatekeeper-trusted, not notarized, and not a clinical or physical-validation claim |
 
 The workflow does not convert a failed stable signing attempt into a development artifact. Stable is fail-closed when credentials or Apple validation are unavailable.
 

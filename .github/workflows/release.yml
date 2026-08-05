@@ -154,7 +154,7 @@ jobs:
           prerelease: ${{ env.RELEASE_CHANNEL == 'development-prerelease' }}
           draft: false
           body: |
-            ${{ env.RELEASE_CHANNEL == 'development-prerelease' && 'Development prerelease for controlled testing. This build is not signed or notarized; do not use it for clinical decisions or patient care.' || 'Stable Apple Silicon release, signed and notarized through the fail-closed production lane.' }}
+            ${{ env.RELEASE_CHANNEL == 'development-prerelease' && 'Development prerelease for controlled testing. This build has a verified ad-hoc integrity seal, but is not Developer ID-signed or notarized; do not use it for clinical decisions or patient care.' || 'Stable Apple Silicon release, Developer ID-signed and notarized through the fail-closed production lane.' }}
 
             Source revision: `${{ github.sha }}`
 
