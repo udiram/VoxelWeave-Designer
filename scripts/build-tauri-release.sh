@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: build-tauri-release.sh --output-dir PATH [--target aarch64-apple-darwin]
+Usage: build-tauri-release.sh --output-dir PATH [--target aarch64-apple-darwin] [--version VERSION]
 
 Builds the existing Tauri desktop workspace into one .app and one DMG. The
 output directory must be empty or absent. This command is intended for macOS.
@@ -12,6 +12,7 @@ EOF
 
 target="aarch64-apple-darwin"
 output_dir=""
+version=""
 while (($# > 0)); do
   case "$1" in
     --target)
@@ -22,6 +23,11 @@ while (($# > 0)); do
     --output-dir)
       (($# >= 2)) || { usage; exit 2; }
       output_dir="$2"
+      shift 2
+      ;;
+    --version)
+      (($# >= 2)) || { usage; exit 2; }
+      version="$2"
       shift 2
       ;;
     --help|-h)
@@ -41,6 +47,10 @@ done
   exit 1
 }
 [[ -n "$output_dir" ]] || { echo "error: --output-dir is required" >&2; usage; exit 2; }
+if [[ -n "$version" && ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: --version must be a valid SemVer value" >&2
+  exit 2
+fi
 [[ "$(uname -s)" == "Darwin" ]] || {
   echo "error: Tauri packaging is restricted to macOS; run this on a macos-14 runner" >&2
   exit 1
@@ -71,7 +81,11 @@ fi
 
 echo "[tauri] building target=$target from apps/desktop"
 scripts/build-sidecar.sh --output apps/desktop/src-tauri/resources/voxelweave-sidecar
-pnpm --dir apps/desktop exec tauri build --target "$target" --bundles app,dmg
+tauri_args=(build --target "$target" --bundles app,dmg)
+if [[ -n "$version" ]]; then
+  tauri_args+=(--config "{\"version\":\"$version\"}")
+fi
+pnpm --dir apps/desktop exec tauri "${tauri_args[@]}"
 
 bundle_roots=(
   "apps/desktop/src-tauri/target/$target/release/bundle"

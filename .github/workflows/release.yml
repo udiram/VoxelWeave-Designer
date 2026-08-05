@@ -31,6 +31,7 @@ jobs:
       APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -65,7 +66,7 @@ jobs:
               echo "error: stable releases must come from a v*.*.* tag" >&2
               exit 1
             fi
-            version="development-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:12}"
+            version="0.1.${GITHUB_RUN_NUMBER}"
             release_tag="development-${GITHUB_RUN_NUMBER}"
           fi
           {
@@ -73,12 +74,28 @@ jobs:
             echo "RELEASE_TAG=$release_tag"
             echo "RELEASE_OUTPUT=$RUNNER_TEMP/voxelweave-release"
           } >> "$GITHUB_ENV"
+      - name: Require green CI for the exact source revision
+        run: |
+          set -euo pipefail
+          successful_runs="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow CI \
+            --commit "$GITHUB_SHA" \
+            --status completed \
+            --limit 20 \
+            --json conclusion \
+            --jq '[.[] | select(.conclusion == "success")] | length')"
+          if [[ "$successful_runs" -lt 1 ]]; then
+            echo "error: no successful CI run exists for $GITHUB_SHA" >&2
+            exit 1
+          fi
       - name: Build Tauri app and DMG
         run: |
           set -euo pipefail
           mkdir -p "$RELEASE_OUTPUT"
           scripts/build-tauri-release.sh \
             --target aarch64-apple-darwin \
+            --version "$RELEASE_VERSION" \
             --output-dir "$RELEASE_OUTPUT/bundle"
       - name: Sign and notarize according to the release lane
         run: |
@@ -130,6 +147,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           name: VoxelWeave Designer ${{ env.RELEASE_VERSION }}
           prerelease: ${{ env.RELEASE_CHANNEL == 'development-prerelease' }}
           draft: false
