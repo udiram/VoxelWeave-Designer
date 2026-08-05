@@ -1,0 +1,9 @@
+node_modules/
+dist/
+playwright-report/
+test-results/*
+!test-results/visual-evidence/
+test-results/visual-evidence/*
+!test-results/visual-evidence/*.png
+!test-results/visual-evidence/*.json
+.DS_Store

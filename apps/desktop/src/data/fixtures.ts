@@ -1,0 +1,167 @@
+import type {
+  CalibrationProfile,
+  DicomSource,
+  ProjectDocument,
+  SceneObject,
+} from "../types";
+
+export const syntheticSource: DicomSource = {
+  seriesUid: "2.25.7711044245865220291004331",
+  name: "Chest CT · synthetic lung phantom",
+  modality: "CT",
+  sliceCount: 150,
+  dimensions: { x: 512, y: 512, z: 150 },
+  spacing: { x: 0.7, y: 0.7, z: 1 },
+  origin: { x: -179.2, y: -179.2, z: -75 },
+  orientation: "Patient RAS · identity orientation matrix",
+  huRange: { min: -1024, max: 1240 },
+  status: "ready",
+  cache: {
+    scientificSource: "full-resolution signed-HU cache",
+    preview: "256³ refined",
+    identity: "sha256:8d0c…b4e1",
+  },
+};
+
+export const syntheticScene: SceneObject[] = [
+  {
+    id: "scene-lung-volume",
+    name: "Chest CT volume",
+    kind: "dicom",
+    region: "measurement",
+    tool: "T0",
+    transform: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+    },
+    visible: true,
+  },
+  {
+    id: "scene-reference-box",
+    name: "Reference frame",
+    kind: "box",
+    region: "fixture",
+    tool: "T1",
+    transform: {
+      position: { x: 0, y: 0, z: -26 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 190, y: 190, z: 3 },
+    },
+    visible: true,
+  },
+  {
+    id: "scene-airway-support",
+    name: "Airway support",
+    kind: "cylinder",
+    region: "support",
+    tool: "T1",
+    transform: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 14, y: 14, z: 54 },
+    },
+    visible: true,
+  },
+];
+
+export const syntheticCalibrations: CalibrationProfile[] = [
+  {
+    id: "cal-t0-natural",
+    name: "T0 Natural PLA / 0.25 mm",
+    tool: "T0",
+    material: "Natural PLA",
+    lot: "NAT-2405-A",
+    printer: "Prusa XL · PXL-07",
+    scanner: "GE Revolution CT · synthetic",
+    reconstruction: "STANDARD / BONE",
+    nozzleMm: 0.25,
+    layerHeightMm: 0.2,
+    accepted: true,
+    widthRange: [0.48, 1.05],
+    huSamples: [
+      { widthMm: 0.48, measuredHu: -872, targetHu: -880 },
+      { widthMm: 0.62, measuredHu: -824, targetHu: -820 },
+      { widthMm: 0.82, measuredHu: -742, targetHu: -740 },
+      { widthMm: 1.02, measuredHu: -680, targetHu: -690 },
+    ],
+  },
+  {
+    id: "cal-t1-white",
+    name: "T1 White PLA / 0.4 mm",
+    tool: "T1",
+    material: "White PLA",
+    lot: "WHT-2404-C",
+    printer: "Prusa XL · PXL-07",
+    scanner: "GE Revolution CT · synthetic",
+    reconstruction: "STANDARD / BONE",
+    nozzleMm: 0.4,
+    layerHeightMm: 0.2,
+    accepted: true,
+    widthRange: [0.62, 1.2],
+    huSamples: [
+      { widthMm: 0.62, measuredHu: -430, targetHu: -420 },
+      { widthMm: 0.84, measuredHu: -280, targetHu: -270 },
+      { widthMm: 1.02, measuredHu: -112, targetHu: -120 },
+      { widthMm: 1.18, measuredHu: 30, targetHu: 0 },
+    ],
+  },
+];
+
+export const syntheticProjectDocument: ProjectDocument = {
+  schemaVersion: 1,
+  projectId: "vw-demo-lung-2026-08",
+  name: "Lung phantom study",
+  savedAt: "2026-08-04T15:00:00.000Z",
+  source: syntheticSource,
+  scene: syntheticScene,
+  selection: {
+    orientation: "axial",
+    kind: "range",
+    start: 42,
+    end: 96,
+    thicknessMm: 54,
+    outputMode: "continuous",
+    crop: {
+      x: [-90, 90],
+      y: [-90, 90],
+      z: [-37, 17],
+    },
+    scale: 1,
+    created: false,
+  },
+  calibrations: syntheticCalibrations,
+  toolpath: {
+    generated: false,
+    selectedLayer: 112,
+    totalLayers: 270,
+    clippingPercent: 1.8,
+    clippingAcknowledged: false,
+    audited: false,
+    estimated: {
+      printTime: "6 h 24 min",
+      t0Grams: 84.2,
+      t1Grams: 31.8,
+      toolChanges: 42,
+    },
+  },
+  send: {
+    packageExported: false,
+    connection: "Prusa XL ready",
+    printStarted: false,
+  },
+  verify: {
+    evidenceImported: false,
+    registrationMethod: "not registered",
+    confidence: "low",
+    comparisonMode: "overlay",
+    reportExported: false,
+    comparison: {
+      meanAbsoluteHu: 0,
+      p95AbsoluteHu: 0,
+      registeredVoxels: 0,
+    },
+  },
+};
+
+export const projectDisplayDate = "04 Aug 2026 · 15:00";

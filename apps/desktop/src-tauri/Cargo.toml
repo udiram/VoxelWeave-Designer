@@ -1,0 +1,24 @@
+[package]
+name = "voxelweave-designer"
+version = "0.1.0"
+description = "VoxelWeave Designer Apple Silicon desktop shell"
+authors = ["VoxelWeave"]
+edition = "2021"
+
+[lib]
+name = "voxelweave_designer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.7", features = [] }
+tauri-plugin-dialog = "2.3"
+tauri-plugin-fs = "2.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+default = ["custom-protocol"]

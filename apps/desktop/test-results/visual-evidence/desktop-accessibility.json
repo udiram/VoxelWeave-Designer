@@ -1,0 +1,13 @@
+{
+  "landmarks": {
+    "main": true,
+    "navigation": true,
+    "footer": true
+  },
+  "namedInteractiveControls": 25,
+  "focusVisibleRule": true,
+  "overflow": {
+    "width": 1536,
+    "viewport": 1536
+  }
+}

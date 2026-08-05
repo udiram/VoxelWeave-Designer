@@ -1,0 +1,41 @@
+import { useMemo, useState } from "react";
+import { useProject } from "../../state/ProjectContext";
+import { Button, Disclosure, Notice, NumberField, SegmentedControl, SelectField, StatusBadge, IconButton } from "../../components/ui";
+import { Icon } from "../../components/icons";
+import { CalibrationPlot } from "../../components/visuals";
+import { AppStatusBar, RailHeader } from "../shell/Shell";
+import type { ToolId } from "../../types";
+
+export function CalibrateWorkspace() {
+  const { state, dispatch } = useProject();
+  const [tool, setTool] = useState<ToolId>("T0");
+  const [evidenceOpen, setEvidenceOpen] = useState(true);
+  const profile = useMemo(() => state.calibrations.find((candidate) => candidate.tool === tool) ?? state.calibrations[0], [state.calibrations, tool]);
+  const allAccepted = state.calibrations.every((candidate) => candidate.accepted);
+
+  return <div className="workspace-layout calibrate-layout">
+    <aside className="left-rail calibrate-rail" aria-label="Calibration profiles rail">
+      <RailHeader title="Profiles" action="plus" actionLabel="Add calibration profile" onAction={() => dispatch({ type: "SET_TOAST", message: "New profiles are created by the sidecar calibration workflow" })} />
+      <div className="profile-list">{state.calibrations.map((candidate) => <button type="button" key={candidate.id} className={`profile-row ${candidate.id === profile.id ? "selected" : ""}`} onClick={() => setTool(candidate.tool)}><span className={`tool-swatch ${candidate.tool.toLowerCase()}`} /><span className="profile-copy"><strong>{candidate.name}</strong><small>{candidate.printer}</small><small>{candidate.scanner}</small></span><StatusBadge tone={candidate.accepted ? "ready" : "warning"} icon={candidate.accepted ? "checkCircle" : "warning"}>{candidate.accepted ? "Accepted" : "Review"}</StatusBadge></button>)}</div>
+      <div className="rail-divider" />
+      <div className="binding-summary"><div><Icon name="link" size={15} /><span>Bound fields</span></div><p>Tool · material · lot · printer · scanner · reconstruction</p><StatusBadge tone="ready" icon="check">all matched</StatusBadge></div>
+      <div className="rail-bottom"><Button variant="quiet" icon="file" onClick={() => dispatch({ type: "SET_TOAST", message: "Calibration evidence manifest is available in the run package" })}>Open evidence manifest</Button></div>
+    </aside>
+    <section className="workspace-center calibrate-center" aria-labelledby="calibrate-heading">
+      <div className="center-toolbar"><div><span className="workspace-kicker">RAIL WIDTH → HU EVIDENCE</span><h1 id="calibrate-heading">Calibrate</h1></div><div className="tool-group"><Button variant="quiet" icon="refresh" onClick={() => dispatch({ type: "SET_TOAST", message: "Calibration samples refreshed from deterministic evidence" })}>Refresh samples</Button><IconButton label="Calibration help" icon="help" onClick={() => dispatch({ type: "SET_TOAST", message: "Commanded rail width is the independent variable; pitch and layer height stay locked" })} /></div></div>
+      <div className="calibrate-toolbar"><SegmentedControl label="Tool profile" value={tool} options={[{ value: "T0", label: "T0 · 0.25 mm" }, { value: "T1", label: "T1 · 0.4 mm" }]} onChange={(value) => setTool(value as ToolId)} /><span className="mpr-toolbar-note"><Icon name="database" size={15} />Source: signed-HU calibration rail field</span></div>
+      <div className="calibration-summary"><div><span>Profile</span><strong>{profile.name}</strong></div><div><span>Width boundary</span><strong>{profile.widthRange[0].toFixed(2)}–{profile.widthRange[1].toFixed(2)} mm</strong></div><div><span>Layer height</span><strong>{profile.layerHeightMm.toFixed(2)} mm</strong></div><div><span>Evidence state</span><StatusBadge tone="ready" icon="check">accepted</StatusBadge></div></div>
+      <div className="calibration-main"><div className="plot-panel"><div className="plot-heading"><div><h2>Rail field fit</h2><p>Measured HU samples · interpolation stays inside the accepted width range.</p></div><StatusBadge tone="ready" icon="check">fit stable</StatusBadge></div><CalibrationPlot tool={tool} /><div className="plot-legend"><span><i className="legend-line teal" />Measured samples</span><span><i className="legend-line sienna" />Requested width</span><span><i className="legend-range" />Accepted boundary</span></div></div><div className="sample-table" aria-label="Calibration HU samples"><div className="table-caption"><span>HU samples</span><span>4 rows · full-resolution source</span></div><table><thead><tr><th>Width</th><th>Measured HU</th><th>Target HU</th><th>Δ HU</th></tr></thead><tbody>{profile.huSamples.map((sample) => <tr key={sample.widthMm}><td>{sample.widthMm.toFixed(2)} mm</td><td>{sample.measuredHu}</td><td>{sample.targetHu}</td><td className={Math.abs(sample.measuredHu - sample.targetHu) > 25 ? "warning-text" : ""}>{sample.measuredHu - sample.targetHu > 0 ? "+" : ""}{sample.measuredHu - sample.targetHu}</td></tr>)}</tbody></table><div className="table-foot"><Icon name="info" size={14} /><span>Target values are deterministic synthetic acceptance fixtures, not clinical thresholds.</span></div></div></div>
+      <div className="calibration-actions"><Button variant="secondary" icon="ruler" onClick={() => dispatch({ type: "SET_TOAST", message: `Fit recomputed for ${profile.name}; accepted range unchanged` })}>Fit rail field</Button><Button variant="primary" icon="check" onClick={() => dispatch({ type: "REVIEW_CALIBRATION", profileId: profile.id })} data-testid="review-calibration">Review calibration</Button></div>
+    </section>
+    <aside className="right-inspector calibration-inspector" aria-label="Calibration inspector">
+      <div className="inspector-title"><div><span className="workspace-kicker">BOUND PROTOCOL</span><h2>{tool} profile</h2></div><IconButton label="Profile options" icon="more" size={17} onClick={() => dispatch({ type: "SET_TOAST", message: "Profile options: inspect acceptance or duplicate as a new lot" })} /></div>
+      <div className="inspector-section"><h3>Identity</h3><SelectField label="Material" value={profile.material} onChange={() => dispatch({ type: "SET_TOAST", message: "Material identity is fixed by the accepted calibration" })}><option>{profile.material}</option><option>Generic white PLA</option></SelectField><SelectField label="Printer" value={profile.printer} onChange={() => dispatch({ type: "SET_TOAST", message: "Printer identity is fixed by the accepted calibration" })}><option>{profile.printer}</option></SelectField><SelectField label="Reconstruction" value={profile.reconstruction} onChange={() => dispatch({ type: "SET_TOAST", message: "Reconstruction identity is fixed by the source evidence" })}><option>{profile.reconstruction}</option></SelectField></div>
+      <Disclosure title="Acceptance boundary" open={evidenceOpen} onToggle={() => setEvidenceOpen((open) => !open)}><div className="boundary-readout"><div><span>Commanded width</span><strong>{profile.widthRange[0].toFixed(2)}–{profile.widthRange[1].toFixed(2)} mm</strong></div><div><span>Layer height</span><strong>{profile.layerHeightMm.toFixed(2)} mm · locked</strong></div><div><span>Nozzle</span><strong>{profile.nozzleMm.toFixed(2)} mm</strong></div></div></Disclosure>
+      <Notice tone="success" title="No field mismatch"><span>Tool, material, lot, printer, scanner, and reconstruction match the synthetic project.</span></Notice>
+      <div className="inspector-note"><Icon name="warning" size={15} /><span>Out-of-range commanded widths fail closed. Silent extrapolation is not permitted.</span></div>
+      <div className="inspector-actions"><Button variant="primary" icon="arrowUpRight" onClick={() => dispatch({ type: "SET_WORKSPACE", workspace: "prepare" })} disabled={!allAccepted || !state.selection.created}>Continue to Prepare</Button><Button variant="quiet" icon="download" onClick={() => dispatch({ type: "SET_TOAST", message: "Calibration receipt copied to the local evidence manifest" })}>Export calibration receipt</Button></div>
+    </aside>
+    <AppStatusBar crosshair="rail field sample · −742 HU target" />
+  </div>;
+}
