@@ -106,6 +106,15 @@ describe("native sidecar bridge", () => {
     expect(requests.find((request) => request.operation === "export_run_package")?.payload.directory).toBe("/Users/test/Library/Application Support/com.voxelweave.designer/exports/vw-demo-lung-2026-08/run-package");
   });
 
+  it("uses app-owned future cache paths without redundant first-run authorization", async () => {
+    const project = structuredClone(syntheticProjectDocument);
+    project.source = { ...project.source, path: "/Users/test/CT", seriesUid: "series-local", sliceCount: 12 };
+    await new NativeSidecarClient().buildVolumeCache(project);
+    expect(invoke.mock.calls.some((call) => call[0] === "authorize_path")).toBe(false);
+    const request = invoke.mock.calls.map((call) => call[1]?.request).find((candidate: { operation: string }) => candidate.operation === "build_volume_cache");
+    expect(request.payload.directory).toBe("/Users/test/Library/Caches/com.voxelweave.designer/sessions/vw-demo-lung-2026-08");
+  });
+
   it("preserves scan-back provenance and uses the dedicated verification export operation", async () => {
     const project = structuredClone(syntheticProjectDocument);
     project.source = { ...project.source, path: "/Users/test/CT", seriesUid: "series-local", sourceHash: "source-hash" };

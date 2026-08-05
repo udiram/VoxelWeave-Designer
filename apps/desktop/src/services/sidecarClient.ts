@@ -315,7 +315,6 @@ export class NativeSidecarClient implements SidecarClient {
   async buildVolumeCache(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ directory?: string; volumePath?: string; previewPath?: string; sourceHash?: string; dimensions?: { x: number; y: number; z: number }; spacing?: Vec3; origin?: Vec3; directionLps?: number[][] }> {
     await this.ensureSelected(project, onProgress);
     const directory = await nativeCacheDirectory(project);
-    if (isTauriRuntime()) await invoke("authorize_path", { path: directory });
     const result = await this.request<Record<string, unknown>>("build_volume_cache", { directory }, onProgress);
     const scientific = result.scientific_source as Record<string, unknown> | undefined;
     const header = scientific?.header as Record<string, unknown> | undefined;
