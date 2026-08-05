@@ -1,0 +1,12 @@
+VoxelWeave Designer public visual assets
+
+The following files are copies of accepted design concepts committed in the repository at design/concepts/ on the base release:
+
+- workspace-dicom.png <- desktop-dicom-workspace.png
+- workspace-prepare.png <- desktop-prepare-workspace.png
+- fabrication-bench.png <- site-workflow.png
+- hero-reference.png <- site-hero.png
+- release-reference.png <- site-release.png
+- palette-reference.png <- palette-board.png
+
+These assets are used as provenance-backed product-render and fabrication-bench references. They are not scientific source data, are not raw DICOM files, and contain no published patient identifiers. Product controls, release metadata, evidence statuses, and navigation are implemented as semantic site markup rather than shipped as a screenshot UI.

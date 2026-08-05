@@ -1,0 +1,69 @@
+---
+import BaseLayout from '../components/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+
+const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udbhavram/VoxelWeave';
+---
+
+<BaseLayout
+  title="Installation"
+  description="Install VoxelWeave Designer on macOS 14+ Apple Silicon and verify the architecture before opening a project."
+  active="installation"
+>
+  <div class="content-page">
+    <section class="section-shell">
+      <div class="page-intro">
+        <h1>Install the Apple Silicon build.</h1>
+        <p>VoxelWeave Designer v1 is packaged as a native macOS application for macOS 14+ on Apple Silicon. A public download appears here only when a signed release artifact and its checksum are published.</p>
+      </div>
+
+      <div class="content-grid">
+        <article class="content-block">
+          <h2>Before you install</h2>
+          <ul>
+            <li>macOS 14 or later.</li>
+            <li>Apple Silicon hardware. Intel, Rosetta, Windows, Linux, and universal binaries are not supported in v1.</li>
+            <li>An accepted calibration for the tool, material, printer, scanner, and reconstruction context you intend to use.</li>
+            <li>A complete DICOM series or a designer-created solid. Display screenshots are not scientific source data.</li>
+          </ul>
+        </article>
+
+        <article class="content-block">
+          <h2>Verify the architecture</h2>
+          <p>Open Terminal and check the machine architecture before downloading:</p>
+          <pre class="architecture-receipt"><span class="prompt">$</span> uname -m
+arm64</pre>
+          <p>If the result is not <code>arm64</code>, do not use the Apple Silicon package.</p>
+        </article>
+
+        <article class="content-block">
+          <h2>Install from a release</h2>
+          <ol>
+            <li>Open the current release section on the <a class="text-link" href="/#evidence">home page</a>.</li>
+            <li>Read the artifact name, architecture, size, SHA-256, source revision, and published evidence.</li>
+            <li>Download the DMG or ZIP from the verified GitHub release link.</li>
+            <li>Open the DMG and drag <strong>VoxelWeave Designer.app</strong> to Applications.</li>
+            <li>Open the application from Applications. Keep the release record with any run package you share.</li>
+          </ol>
+        </article>
+
+        <article class="content-block">
+          <h2>If no release is listed</h2>
+          <p>No signed public build has been published yet. Use the <a class="text-link" href={githubUrl} target="_blank" rel="noreferrer">GitHub source</a> to inspect the project and its build workflow; do not treat a source archive or an invented link as a desktop download.</p>
+        </article>
+
+        <article class="content-block">
+          <h2>After launch</h2>
+          <p>Create or open a <code>.voxelweave</code> project, import a complete series or build geometry, inspect source coordinates, bind calibration evidence, and review the generated run package before any attended print action.</p>
+          <a class="text-link" href="/documentation/">Read the workflow documentation <Icon name="arrow" size={18} /></a>
+        </article>
+
+        <article class="content-block">
+          <h2>Research boundary</h2>
+          <p>A successful install, software audit, exact preview, or G-code generation does not prove deposited geometry or physical HU fidelity.</p>
+          <a class="text-link" href="/scientific-boundary/">Read what requires scan-back evidence <Icon name="arrow" size={18} /></a>
+        </article>
+      </div>
+    </section>
+  </div>
+</BaseLayout>

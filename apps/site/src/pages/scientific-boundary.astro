@@ -1,0 +1,73 @@
+---
+import BaseLayout from '../components/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+---
+
+<BaseLayout
+  title="Scientific boundary"
+  description="The VoxelWeave Designer scientific boundary: what software evidence can establish, what it cannot, and why accepted calibration and CT scan-back remain required."
+  active="boundary"
+>
+  <div class="content-page">
+    <section class="section-shell">
+      <div class="page-intro">
+        <h1>Software evidence stops at the printer.</h1>
+        <p>VoxelWeave Designer is research-only and non-diagnostic. It makes the digital fabrication chain inspectable while keeping physical claims tied to measured evidence.</p>
+      </div>
+
+      <div class="content-grid">
+        <article class="content-block boundary-matrix">
+          <h2>Evidence boundary</h2>
+          <table class="contract-table">
+            <thead><tr><th scope="col">Software can verify</th><th scope="col">Software cannot establish</th><th scope="col">Required next evidence</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Source-series identity, geometry, orientation, spacing, and selected physical coordinates.</td>
+                <td>That the printer deposited the commanded rail width in the material.</td>
+                <td>Physical coupon measurement under the intended print protocol.</td>
+              </tr>
+              <tr>
+                <td>Calibration identity, tool/material ownership, locked parameters, and calibration range checks.</td>
+                <td>That a calibration curve remains valid outside its measured tool, material, printer, scanner, reconstruction, or range.</td>
+                <td>An accepted, context-matched calibration or an explicit documented limitation.</td>
+              </tr>
+              <tr>
+                <td>Emitted paths, ordering, transforms, manifests, file integrity, and reverse-audit findings.</td>
+                <td>That the printed object has the intended physical density or HU fidelity.</td>
+                <td>CT scan-back, registration with explicit confidence, and comparison against the source.</td>
+              </tr>
+              <tr>
+                <td>That an export or optional upload request completed without automatic print start.</td>
+                <td>Clinical meaning, diagnostic suitability, or patient-specific treatment decisions.</td>
+                <td>Qualified expert review within an approved research protocol; never this software alone.</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+
+        <article class="content-block" id="verification">
+          <h2>Verification workflow</h2>
+          <ol>
+            <li>Bind the intended tool, material, lot, printer, scanner, reconstruction, nozzle, flow, and layer-height context.</li>
+            <li>Review the source geometry and the physical crop or slab selection.</li>
+            <li>Generate and reverse-audit exact G-code with manifests, transforms, hashes, and a toolpath trace.</li>
+            <li>Print as an attended external action under the accepted protocol.</li>
+            <li>Acquire scan-back data, register it with explicit confidence, compare HU and geometry, and preserve the report.</li>
+          </ol>
+        </article>
+
+        <article class="content-block">
+          <h2>Claims vocabulary</h2>
+          <p>Use concrete evidence language. “Source geometry audited” refers to the digital package. “Calibration bound” refers to an identified calibration record. “Scan-back comparison available” refers to a measured registered comparison. Do not replace these with “accurate,” “validated,” “safe,” or “clinical.”</p>
+          <a class="text-link" href="/documentation/">Read the product contract <Icon name="arrow" size={18} /></a>
+        </article>
+
+        <article class="content-block">
+          <h2>Out of scope</h2>
+          <p>The product does not diagnose, segment anatomy automatically, start a printer, silently extrapolate calibration, or turn preview imagery into scientific output. It does not make a patient-specific decision.</p>
+          <a class="text-link" href="/installation/">Read the installation boundary <Icon name="arrow" size={18} /></a>
+        </article>
+      </div>
+    </section>
+  </div>
+</BaseLayout>

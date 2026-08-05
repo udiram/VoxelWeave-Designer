@@ -1,0 +1,81 @@
+---
+import Icon from './Icon.astro';
+import '../styles/site.css';
+
+interface Props {
+  title: string;
+  description: string;
+  active?: 'home' | 'documentation' | 'installation' | 'boundary';
+}
+
+const { title, description, active = 'home' } = Astro.props;
+const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udbhavram/VoxelWeave';
+const pageTitle = title.includes('VoxelWeave') ? title : `${title} · VoxelWeave Designer`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="description" content={description} />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23bf3f0e'/%3E%3Cpath d='M8 8h16v4H12v4h9v4h-9v4H8z' fill='white'/%3E%3C/svg%3E" />
+    <title>{pageTitle}</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="wordmark" href="/" aria-label="VoxelWeave Designer home">VoxelWeave Designer</a>
+        <nav class="site-nav" id="site-nav" aria-label="Primary navigation">
+          <a href="/#workflow" class:list={{ active: active === 'home' }}>Workflow</a>
+          <a href="/#evidence">Evidence</a>
+          <a href="/documentation/" class:list={{ active: active === 'documentation' }}>Documentation</a>
+          <a href={githubUrl} target="_blank" rel="noreferrer">GitHub <Icon name="external" size={14} /></a>
+        </nav>
+        <a class="header-download" data-download-cta href="/#evidence">Download for Apple Silicon</a>
+        <button class="menu-button" id="menu-button" type="button" aria-expanded="false" aria-controls="site-nav">
+          <span class="sr-only">Open navigation menu</span>
+          <Icon name="menu" size={22} />
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer__inner">
+        <a class="footer-brand" href="/">VoxelWeave Designer</a>
+        <nav aria-label="Footer navigation">
+          <a href="/documentation/">Documentation</a>
+          <a href="/#evidence">Releases</a>
+          <a href={githubUrl} target="_blank" rel="noreferrer">GitHub</a>
+          <a href="/scientific-boundary/">Scientific boundary</a>
+        </nav>
+        <p>Research use only. Not for diagnostic interpretation.</p>
+      </div>
+    </footer>
+
+    <script>
+      const menuButton = document.querySelector('#menu-button');
+      const siteNav = document.querySelector('#site-nav');
+      if (menuButton instanceof HTMLButtonElement && siteNav instanceof HTMLElement) {
+        menuButton.addEventListener('click', () => {
+          const isOpen = menuButton.getAttribute('aria-expanded') === 'true';
+          menuButton.setAttribute('aria-expanded', String(!isOpen));
+          siteNav.classList.toggle('is-open', !isOpen);
+          const label = menuButton.querySelector('.sr-only');
+          if (label) label.textContent = isOpen ? 'Open navigation menu' : 'Close navigation menu';
+        });
+        siteNav.addEventListener('click', (event) => {
+          if (event.target instanceof HTMLAnchorElement) {
+            menuButton.setAttribute('aria-expanded', 'false');
+            siteNav.classList.remove('is-open');
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

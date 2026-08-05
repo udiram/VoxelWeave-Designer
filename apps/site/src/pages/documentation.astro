@@ -1,0 +1,85 @@
+---
+import BaseLayout from '../components/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+
+const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udbhavram/VoxelWeave';
+---
+
+<BaseLayout
+  title="Documentation"
+  description="VoxelWeave Designer documentation: the six-workspace workflow, source and output contracts, and research-use boundaries."
+  active="documentation"
+>
+  <div class="content-page">
+    <section class="section-shell">
+      <div class="page-intro">
+        <h1>Documentation for an inspectable fabrication workflow.</h1>
+        <p>VoxelWeave Designer keeps source geometry, calibration identity, tool ownership, emitted paths, and scan-back evidence connected inside a saved <code>.voxelweave</code> project.</p>
+      </div>
+
+      <div class="content-grid">
+        <article class="content-block">
+          <h2>Six workspaces</h2>
+          <p>The desktop workspace is organized around the decisions that change a physical run.</p>
+          <ol>
+            <li><strong>Design</strong> — create primitives, import solids, transform geometry, and define material regions.</li>
+            <li><strong>DICOM</strong> — import a complete series and inspect synchronized axial, sagittal, coronal, and 3D views.</li>
+            <li><strong>Calibrate</strong> — bind tool, material, scanner, reconstruction, and rail-width-to-HU evidence.</li>
+            <li><strong>Prepare</strong> — audit exact toolpaths, clipping, flow, bed, runtime, and safety checks.</li>
+            <li><strong>Send</strong> — export locally or use an optional authenticated Prusa Connect upload. Printing remains attended.</li>
+            <li><strong>Verify</strong> — register scan-back data, compare HU, preserve provenance, and export a research package.</li>
+          </ol>
+        </article>
+
+        <article class="content-block">
+          <h2>Source contract</h2>
+          <p>Full-resolution signed HU data in the scientific engine is the source of truth. Display pyramids and WebGL textures are previews only.</p>
+          <ul>
+            <li>DICOM geometry follows physical patient coordinates and orientation matrices, not filename order or screenshots.</li>
+            <li>Complete-series import is required for volume-aware output.</li>
+            <li>Continuous-volume output samples the selected physical slab at printer-layer centers without artificial slice interfaces.</li>
+            <li>Tile output preserves source-plane identity and keeps structural labels outside the calibrated measurement region.</li>
+          </ul>
+        </article>
+
+        <article class="content-block">
+          <h2>Output contract</h2>
+          <p>The conversion path is explicit and auditable:</p>
+          <table class="contract-table">
+            <thead><tr><th scope="col">Stage</th><th scope="col">Contract</th></tr></thead>
+            <tbody>
+              <tr><td>Calibrate</td><td>Commanded rail width maps monotonically to measured HU for the bound tool/material/scanner context.</td></tr>
+              <tr><td>Convert</td><td>Selected source values become fixed-pitch, alternating X/Y variable-width roads.</td></tr>
+              <tr><td>Audit</td><td>Generated G-code is reverse-audited with manifests, transforms, hashes, and a toolpath trace.</td></tr>
+              <tr><td>Verify</td><td>Scan-back comparison remains a separate evidence step; a successful export is not physical proof.</td></tr>
+            </tbody>
+          </table>
+        </article>
+
+        <article class="content-block">
+          <h2>Saved run package</h2>
+          <p>A run package is intended for collaboration and review, not only for printer transfer.</p>
+          <ul>
+            <li>Project document and source-series identity.</li>
+            <li>Calibration identity, tool/material ownership, and locked print parameters.</li>
+            <li>Source-to-print transforms, generated G-code, manifests, and file hashes.</li>
+            <li>Toolpath trace, audit findings, and any explicit acknowledgments.</li>
+            <li>Scan-back registration, comparisons, plots, and research conclusions when available.</li>
+          </ul>
+        </article>
+
+        <article class="content-block">
+          <h2>What v1 does not do</h2>
+          <p>VoxelWeave Designer v1 does not provide diagnostic interpretation, automatic anatomical segmentation, oblique printing, curved planar reformations, STEP/B-rep CAD, automatic printer start, silent calibration extrapolation, or scientific conversion from preview data.</p>
+          <a class="text-link" href="/scientific-boundary/">Read the scientific boundary <Icon name="arrow" size={18} /></a>
+        </article>
+
+        <article class="content-block">
+          <h2>Source and license</h2>
+          <p>The public release, issue history, reproducibility materials, and license are maintained with the source repository.</p>
+          <a class="button-secondary" href={githubUrl} target="_blank" rel="noreferrer">Open the GitHub repository <Icon name="external" size={16} /></a>
+        </article>
+      </div>
+    </section>
+  </div>
+</BaseLayout>
