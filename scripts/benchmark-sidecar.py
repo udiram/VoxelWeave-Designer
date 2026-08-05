@@ -69,6 +69,26 @@ def _calibration() -> list[dict[str, Any]]:
     ]
 
 
+def _validation_scene() -> dict[str, Any]:
+    """Return a minimal complete canonical solid for the bridge launch probe."""
+
+    return {
+        "coordinate_frame": "designer_scene_mm",
+        "regions": [
+            {
+                "id": "native-perf",
+                "kind": "box",
+                "owner": "T0:measurement",
+                "region": "measurement",
+                "tool": "T0",
+                "target_hu": 0,
+                "visible": True,
+                "geometry": {"kind": "box", "dimensions": [2, 3, 4]},
+            }
+        ],
+    }
+
+
 class SidecarClient:
     def __init__(self, command: list[str], *, request_timeout_seconds: float) -> None:
         environment = os.environ.copy()
@@ -172,7 +192,8 @@ def _run_iteration(command: list[str], iteration_dir: Path, request_timeout_seco
     client = SidecarClient(command, request_timeout_seconds=request_timeout_seconds)
     try:
         response, elapsed, first_progress, progress_count = client.request(
-            "validate_scene", {"scene": {"regions": [{"id": "native-perf", "owner": "T0:measurement"}]}}
+            "validate_scene",
+            {"scene": _validation_scene()},
         )
         if _require_payload(response, "validate_scene").get("passed") is not True:
             raise BenchmarkFailure("validate_scene did not pass")

@@ -5,31 +5,37 @@
     "first_workspace_render_ms": {
       "target_ms": 2000,
       "gate_ms": 10000,
+      "gate_statistic": "max",
       "description": "First meaningful Design workspace render after navigation"
     },
     "dicom_mpr_interaction_p95_frame_ms": {
       "target_ms": 16.7,
       "gate_ms": 120,
+      "gate_statistic": "p95",
       "description": "95th-percentile requestAnimationFrame interval during DICOM MPR and volume interactions"
     },
     "design_geometry_interaction_p95_frame_ms": {
       "target_ms": 16.7,
       "gate_ms": 120,
+      "gate_statistic": "p95",
       "description": "95th-percentile requestAnimationFrame interval during React Three Fiber geometry and transform interactions"
     },
     "toolpath_interaction_p95_frame_ms": {
       "target_ms": 16.7,
       "gate_ms": 120,
+      "gate_statistic": "p95",
       "description": "95th-percentile requestAnimationFrame interval during generated toolpath layer interactions"
     },
     "main_thread_long_task_max_ms": {
       "target_ms": 100,
       "gate_ms": 1000,
+      "gate_statistic": "max",
       "description": "Maximum Long Task API duration observed during measured interactions"
     },
     "webgl2_probe_ms": {
       "target_ms": 50,
       "gate_ms": 5000,
+      "gate_statistic": "max",
       "description": "Temporary Chromium WebGL2 capability probe duration"
     }
   },

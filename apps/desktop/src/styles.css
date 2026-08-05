@@ -212,6 +212,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .volume-controls select { padding: 0 6px; }
 .volume-reset { width: 27px; height: 27px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid #596467; border-radius: 4px; background: #1b2021; color: #e6e9e9; cursor: pointer; }
 .volume-overlay-label, .viewport-badge, .scene-object-label { display: inline-block; padding: 4px 7px; border: 1px solid rgb(220 225 226 / 32%); border-radius: 4px; background: rgb(12 15 16 / 74%); color: #e4e8e8; white-space: nowrap; font: 10px/13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.viewport-badge-overlay { position: absolute; top: 12px; left: 12px; z-index: 2; pointer-events: none; }
 .scene-object-label { border-color: rgb(185 76 35 / 58%); color: #f4d2c4; font-size: 9px; }
 .viewport-validation-state { position: absolute; left: 10px; bottom: 8px; z-index: 3; padding: 3px 6px; border: 1px solid rgb(112 130 131 / 48%); border-radius: 3px; background: rgb(16 19 20 / 78%); color: #aeb7b8; font: 9px/12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .mpr-readout { position: absolute; left: 10px; bottom: 8px; z-index: 2; padding: 3px 6px; border: 1px solid rgb(112 130 131 / 48%); border-radius: 3px; background: rgb(16 19 20 / 78%); color: #d7dadd; font: 9px/12px ui-monospace, SFMono-Regular, Menlo, monospace; pointer-events: none; }

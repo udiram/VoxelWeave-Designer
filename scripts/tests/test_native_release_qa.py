@@ -68,6 +68,13 @@ class NativeReleaseQATests(unittest.TestCase):
         self.assertFalse(summaries["uncached_mpr_elapsed_ms"]["gatePassed"])
         self.assertEqual(len(failures), 1)
 
+    def test_native_performance_launch_probe_uses_complete_canonical_geometry(self) -> None:
+        scene = benchmark._validation_scene()
+        region = scene["regions"][0]
+        self.assertEqual(scene["coordinate_frame"], "designer_scene_mm")
+        self.assertEqual(region["owner"], "T0:measurement")
+        self.assertEqual(region["geometry"], {"kind": "box", "dimensions": [2, 3, 4]})
+
     def test_payload_parser_extracts_arm64_and_rejects_x86_payload(self) -> None:
         with tempfile.TemporaryDirectory(prefix="voxelweave-native-payload-test-") as directory:
             root = Path(directory)

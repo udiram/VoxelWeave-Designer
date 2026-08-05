@@ -383,7 +383,10 @@ function meshGeometry(object: SceneObject): THREE.BufferGeometry {
 }
 
 function SceneMesh({ object, selected, onSelect }: { object: SceneObject; selected: boolean; onSelect: () => void }) {
-  const geometry = useMemo(() => meshGeometry(object), [object]);
+  const geometry = useMemo(
+    () => meshGeometry(object),
+    [object.kind, object.dimensionsMm, object.transform.scale, object.vertices, object.faces, object.polygonSides],
+  );
   useEffect(() => () => geometry.dispose(), [geometry]);
   const dimensions = object.dimensionsMm ?? object.transform.scale;
   const sourceDimensions = object.sourceDimensionsMm;
@@ -391,7 +394,7 @@ function SceneMesh({ object, selected, onSelect }: { object: SceneObject; select
   return <mesh geometry={geometry} scale={importedScale} position={[object.transform.position.x, object.transform.position.z, -object.transform.position.y]} rotation={[THREE.MathUtils.degToRad(object.transform.rotation.x), THREE.MathUtils.degToRad(object.transform.rotation.z), THREE.MathUtils.degToRad(-object.transform.rotation.y)]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
     <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent opacity={object.kind === "dicom" ? 0.16 : object.visible ? 0.86 : 0.12} wireframe={object.kind === "dicom"} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
     {selected && <lineSegments><edgesGeometry args={[geometry]} /><lineBasicMaterial color={orange} /></lineSegments>}
-    <Html position={[0, dimensions.z / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>
+    {selected && <Html position={[0, dimensions.z / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>}
   </mesh>;
 }
 
@@ -404,7 +407,6 @@ function DesignScene({ selectedId, onSelect, scene }: { selectedId: string; onSe
     <axesHelper args={[60]} />
     <Bounds fit clip observe margin={1.25}><group>{scene.filter((object) => object.visible).map((object) => <SceneMesh key={object.id} object={object} selected={object.id === selectedId} onSelect={() => onSelect(object.id)} />)}</group></Bounds>
     <OrbitControls makeDefault enablePan enableZoom enableRotate />
-    <Html position={[-140, 120, 0]}><span className="viewport-badge">Scene · physical mm · manifold CSG worker</span></Html>
   </>;
 }
 
@@ -430,6 +432,7 @@ export function DesignViewport({ selectedId, onSelect, scene = [] }: { selectedI
   return <div className="design-viewport" role="img" aria-label="Interactive parametric design scene preview" data-testid="design-scene-viewport" data-voxelweave-renderer="three-r3f">
     {!webgl2Available() && <WebGL2Unavailable label="The parametric design scene" />}
     {webgl2Available() && <Canvas frameloop="demand" gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setWorkerState("WebGL2 unavailable"); }}><DesignScene selectedId={selectedId} onSelect={onSelect} scene={scene} /></Canvas>}
+    <span className="viewport-badge viewport-badge-overlay">Scene · physical mm · manifold CSG worker</span>
     <span className="viewport-validation-state" aria-live="polite">{workerState}</span>
   </div>;
 }

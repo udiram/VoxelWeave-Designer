@@ -36,6 +36,11 @@ class NativeUiReleaseQATests(unittest.TestCase):
         for name, metric in budget["metrics"].items():
             self.assertLess(metric["target_ms"], metric["gate_ms"], name)
             self.assertGreater(metric["gate_ms"], 0, name)
+            self.assertIn(metric["gate_statistic"], {"max", "p95"}, name)
+        interaction_metrics = {name for name in required if "interaction_p95_frame_ms" in name}
+        self.assertTrue(interaction_metrics)
+        for name in interaction_metrics:
+            self.assertEqual(budget["metrics"][name]["gate_statistic"], "p95", name)
         self.assertIn("native WebKit or WKWebView frame pacing", budget["unmeasured"])
 
     def test_native_adapter_operation_lists_and_envelope_match(self) -> None:
@@ -47,4 +52,3 @@ class NativeUiReleaseQATests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
