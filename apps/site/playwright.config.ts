@@ -14,7 +14,7 @@ export default defineConfig({
   },
   projects: [
     { name: 'chromium-desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'chromium-mobile', use: { ...devices['iPhone 13'], viewport: { width: 390, height: 844 } } }
+    { name: 'chromium-mobile', use: { ...devices['Pixel 7'], viewport: { width: 390, height: 844 } } }
   ],
   webServer: {
     command: 'pnpm build && pnpm exec astro preview --host 0.0.0.0',
