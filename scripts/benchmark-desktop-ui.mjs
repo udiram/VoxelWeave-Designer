@@ -68,7 +68,6 @@ const LONG_TASK_INIT_SCRIPT = String.raw`
         durationMs: ended - probe.started,
         frameCount: frames.length,
         fps: frames.length ? (frames.length * 1000) / Math.max(1, ended - probe.started) : 0,
-        frames,
         p50FrameMs: percentile(0.5),
         p95FrameMs: percentile(0.95),
         maxFrameMs: frames.length ? Math.max(...frames) : null,
@@ -124,23 +123,16 @@ function percentile(values, fraction) {
 
 function aggregate(values, budget) {
   const finite = values.filter((value) => Number.isFinite(value));
-  const p95 = percentile(finite, 0.95);
-  const maximum = finite.length ? Math.max(...finite) : null;
-  const gateStatistic = budget?.gate_statistic ?? "max";
-  if (!["max", "p95"].includes(gateStatistic)) throw new Error(`unsupported gate_statistic ${gateStatistic}`);
-  const gateValue = gateStatistic === "p95" ? p95 : maximum;
   const summary = {
     samples: values,
     count: finite.length,
     p50: percentile(finite, 0.5),
-    p95,
-    max: maximum,
+    p95: percentile(finite, 0.95),
+    max: finite.length ? Math.max(...finite) : null,
     targetMs: budget?.target_ms ?? null,
     gateMs: budget?.gate_ms ?? null,
-    gateStatistic,
-    gateValue,
-    targetMet: budget?.target_ms === undefined ? null : finite.length > 0 && p95 <= budget.target_ms,
-    gatePassed: budget?.gate_ms === undefined ? true : finite.length > 0 && gateValue <= budget.gate_ms,
+    targetMet: budget?.target_ms === undefined ? null : finite.length > 0 && percentile(finite, 0.95) <= budget.target_ms,
+    gatePassed: budget?.gate_ms === undefined ? true : finite.length > 0 && Math.max(...finite) <= budget.gate_ms,
   };
   return summary;
 }
@@ -148,7 +140,7 @@ function aggregate(values, budget) {
 function allGateFailures(metrics) {
   return Object.entries(metrics)
     .filter(([, metric]) => metric.gatePassed === false)
-    .map(([name, metric]) => `${name}: ${metric.gateStatistic} ${metric.gateValue ?? "n/a"} ms exceeds gate ${metric.gateMs} ms (max ${metric.max ?? "n/a"}, p95 ${metric.p95 ?? "n/a"})`);
+    .map(([name, metric]) => `${name}: max/p95 ${metric.max ?? "n/a"}/${metric.p95 ?? "n/a"} ms exceeds gate ${metric.gateMs} ms`);
 }
 
 function sleepMs(milliseconds) {
@@ -435,9 +427,9 @@ async function main() {
       iterations.push(await runIteration(browser, url, iteration, browserLogs));
     }
     const firstValues = iterations.map((item) => item.first.performanceNowMs);
-    const dicomValues = iterations.flatMap((item) => item.probes.dicom.frames ?? []);
-    const designValues = iterations.flatMap((item) => item.probes.design.frames ?? []);
-    const toolpathValues = iterations.flatMap((item) => item.probes.toolpath.frames ?? []);
+    const dicomValues = iterations.map((item) => item.probes.dicom.p95FrameMs);
+    const designValues = iterations.map((item) => item.probes.design.p95FrameMs);
+    const toolpathValues = iterations.map((item) => item.probes.toolpath.p95FrameMs);
     const longTaskValues = iterations.flatMap((item) => gatherLongTasks(item.probes ? [item.probes.dicom, item.probes.design, item.probes.toolpath] : [] )).map((task) => task.duration);
     const capabilities = iterations[iterations.length - 1].capabilities;
     const designRenderer = iterations[iterations.length - 1].probes.design.renderer;
