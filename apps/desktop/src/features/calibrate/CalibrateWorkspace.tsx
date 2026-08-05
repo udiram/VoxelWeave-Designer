@@ -68,9 +68,11 @@ export function CalibrateWorkspace() {
       if (typeof selected !== "string") return;
       await authorizeNativePath(selected);
       const raw = JSON.parse(await invoke<string>("read_authorized_text_file", { path: selected })) as Partial<CalibrationProfile>;
+      const importedTool: ToolId = raw.tool === "T1" ? "T1" : "T0";
       const imported: CalibrationProfile = {
-        ...emptyCalibration(raw.tool === "T1" ? "T1" : "T0", typeof raw.id === "string" && raw.id ? raw.id : undefined),
+        ...emptyCalibration(importedTool, typeof raw.id === "string" && raw.id ? raw.id : undefined),
         ...raw,
+        tool: importedTool,
         accepted: false,
         huSamples: Array.isArray(raw.huSamples) ? raw.huSamples : [],
       };
