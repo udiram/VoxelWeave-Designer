@@ -12,13 +12,19 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = "voxelweave.control.v1"
 
 
-def request(process: subprocess.Popen[str], request_id: str, operation: str, payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    envelope = {"protocol": PROTOCOL, "request_id": request_id, "operation": operation, "payload": payload}
+def request(
+    process: subprocess.Popen[str], request_id: str, operation: str, payload: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    envelope = {
+        "protocol": PROTOCOL,
+        "request_id": request_id,
+        "operation": operation,
+        "payload": payload,
+    }
     assert process.stdin is not None and process.stdout is not None
     process.stdin.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n")
     process.stdin.flush()
@@ -33,7 +39,10 @@ def request(process: subprocess.Popen[str], request_id: str, operation: str, pay
             assert value.get("request_id") == request_id, value
             progress.append(value)
             continue
-        if value.get("protocol") != "voxelweave.response.v1" or value.get("request_id") != request_id:
+        if (
+            value.get("protocol") != "voxelweave.response.v1"
+            or value.get("request_id") != request_id
+        ):
             raise AssertionError(f"response correlation failure for {request_id}: {value}")
         return value, progress
 
@@ -96,7 +105,14 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
     environment["PYTHONUNBUFFERED"] = "1"
     source_path = str(ROOT / "engine" / "src")
     environment["PYTHONPATH"] = source_path + os.pathsep + environment.get("PYTHONPATH", "")
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
     try:
         scene, scene_progress = request(
             process,
@@ -123,7 +139,8 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
             "select_dicom_series",
             {"source": "synthetic://voxelweave/lung-phantom"},
         )
-        require_ok(selection_response, "cross-select")
+        selected_series = require_ok(selection_response, "cross-select")
+        selected_series_uid = str(selected_series.get("series_uid", ""))
         cache_response, cache_progress = request(
             process,
             "cross-cache",
@@ -139,6 +156,8 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
             "cross-selection",
             "create_print_selection",
             {
+                "source": "synthetic://voxelweave/lung-phantom",
+                "series_uid": selected_series_uid,
                 "plane": "axial",
                 "mode": "continuous",
                 "start_index": 1,
@@ -146,6 +165,8 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
                 "print_size_mm": [24, 24, 8],
                 "layer_height_mm": 0.2,
                 "stride": 1,
+                "resampling": "trilinear",
+                "structural_regions": [{"id": "lung", "owner": "T0:measurement"}],
             },
         )
         require_ok(selection_response, "cross-selection")
@@ -198,7 +219,9 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
                 "profile": {"printer": "Prusa XL", "sample_step_mm": 2.0},
             },
         )
-        generated_after_preview = require_ok(generated_after_preview_response, "cross-generate-after-preview")
+        generated_after_preview = require_ok(
+            generated_after_preview_response, "cross-generate-after-preview"
+        )
         if generated_after_preview.get("gcode_sha256") != gcode_hash_before_preview:
             raise AssertionError("changing preview resolution changed the scientific G-code hash")
 
@@ -218,6 +241,10 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
         package_two = require_ok(package_two_response, "cross-package-two")
         if package_one.get("hashes") != package_two.get("hashes"):
             raise AssertionError("repeat package generation changed artifact hashes")
+        if not package_one.get("package_name", "").endswith(".zip") or not package_one.get(
+            "package_path"
+        ):
+            raise AssertionError("run package did not return a deterministic ZIP artifact")
 
         error_response, _ = request(
             process,
@@ -225,7 +252,10 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
             "inspect_dicom_source",
             {"source": str(output_dir / "does-not-exist")},
         )
-        if error_response.get("ok") is not False or error_response.get("request_id") != "cross-error":
+        if (
+            error_response.get("ok") is not False
+            or error_response.get("request_id") != "cross-error"
+        ):
             raise AssertionError(f"error response lost request correlation: {error_response}")
         error_code = error_response.get("error", {}).get("code")
         if error_code != "DicomValidationError":
@@ -243,7 +273,9 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
             "packageHashes": package_one.get("hashes", {}),
             "physicalFidelityClaim": "not_established_by_software",
         }
-        (output_dir / "cross-runtime-summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (output_dir / "cross-runtime-summary.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         return summary
     finally:
         if process.stdin:

@@ -32,6 +32,50 @@ from .selection import create_print_selection
 from .synthetic import synthetic_scan_back, write_synthetic_dicom_series
 from .toolpath import PrinterProfile, export_run_package, generate_toolpath, reverse_audit_gcode
 
+_CREATE_SELECTION_FIELDS = {
+    "source",
+    "series_uid",
+    "plane",
+    "mode",
+    "crop_min_lps",
+    "crop_max_lps",
+    "plane_index",
+    "start_index",
+    "end_index",
+    "thickness_mm",
+    "print_size_mm",
+    "layer_height_mm",
+    "stride",
+    "plate_layout",
+    "labels",
+    "structural_regions",
+    "structural_markers",
+    "tile_thickness_mode",
+    "build_volume_mm",
+    "resampling",
+}
+
+
+def _normalize_create_selection_payload(session: EngineSession, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate native UI transport metadata before calling the typed API."""
+
+    unknown = sorted(set(payload) - _CREATE_SELECTION_FIELDS)
+    if unknown:
+        raise ProtocolError(f"create_print_selection contains unsupported fields: {', '.join(unknown)}")
+    if session.volume is None:
+        raise EngineError("Create a print selection after selecting a complete CT series.")
+    if payload.get("source") is not None:
+        resolved = session._resolve_source(str(payload["source"]))
+        if session.source is None or resolved != session.source:
+            raise ProtocolError("create_print_selection source does not match the inspected DICOM source.")
+    if payload.get("series_uid") is not None and str(payload["series_uid"]) != session.volume.series_uid:
+        raise ProtocolError("create_print_selection series_uid does not match the selected DICOM series.")
+    normalized = {key: payload[key] for key in payload if key not in {"source", "series_uid"}}
+    structural = normalized.get("structural_regions")
+    if structural is not None and not isinstance(structural, (list, tuple)):
+        raise GeometryValidationError("structural_regions must be an array of explicit scene/structural regions.")
+    return normalized
+
 
 @dataclass(slots=True)
 class EngineSession:
@@ -215,7 +259,7 @@ class EngineSession:
             if op == Operation.CALCULATE_HISTOGRAM:
                 return calculate_histogram(self._require_volume(), bins=int(payload.get("bins", 256)))
             if op == Operation.CREATE_PRINT_SELECTION:
-                self.selection = create_print_selection(self._require_volume(), **dict(payload))
+                self.selection = create_print_selection(self._require_volume(), **_normalize_create_selection_payload(self, payload))
                 return self.selection.manifest.to_dict()
             if op == Operation.VALIDATE_SCENE:
                 return validate_scene(payload.get("scene", payload))
@@ -226,12 +270,14 @@ class EngineSession:
                     scene_result = validate_scene(payload.get("scene", {}))
                     if not scene_result["passed"]:
                         raise GeometryValidationError("Scene canonical geometry validation failed: " + "; ".join(scene_result["errors"]))
-                calibration_value = payload.get("calibration")
+                calibration_value = payload.get("calibrations", payload.get("calibration"))
                 if calibration_value is None:
                     raise EngineError("Generation requires an explicit calibration object.")
-                calibration: Calibration | CalibrationSet
+                calibration: Calibration | CalibrationSet | Mapping[str, Calibration]
                 if isinstance(calibration_value, list):
                     calibration = CalibrationSet.from_iterable(Calibration.from_dict(item) for item in calibration_value)
+                elif isinstance(calibration_value, Mapping) and "binding" not in calibration_value:
+                    calibration = cast(dict[str, Calibration], {str(key): Calibration.from_dict(dict(value)) for key, value in calibration_value.items()})
                 else:
                     calibration = Calibration.from_dict(dict(calibration_value))
                 self.generated = generate_toolpath(
@@ -239,6 +285,7 @@ class EngineSession:
                     calibration,
                     profile=PrinterProfile(**dict(payload.get("profile", {}))),
                     tool=(str(payload["tool"]) if payload.get("tool") is not None else None),
+                    scene=(payload.get("scene") if isinstance(payload.get("scene"), Mapping) else None),
                     allow_calibration_clipping=bool(payload.get("allow_calibration_clipping", False)),
                     acknowledge_calibration_clipping=bool(payload.get("acknowledge_calibration_clipping", False)),
                     request_id=envelope.request_id,
@@ -296,7 +343,7 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
     manifold_available = False
     manifold_error: str | None = None
     try:
-        from manifold3d import Manifold, Mesh
+        from manifold3d import Manifold, Mesh  # type: ignore[import-not-found]
 
         manifold_available = True
     except Exception as exc:  # pragma: no cover - exercised on native package builds

@@ -49,6 +49,7 @@ class VolumePreview:
     source_shape_zyx: tuple[int, int, int]
     source_hash: str
     max_dimension: int
+    resampling: str = "block_average_signed_hu"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +59,7 @@ class VolumePreview:
             "source_shape_zyx": list(self.source_shape_zyx),
             "source_hash": self.source_hash,
             "max_dimension": self.max_dimension,
+            "resampling": self.resampling,
             "scientific_source": "preview_only",
         }
 
@@ -92,7 +94,7 @@ def _sample_voxel_array(volume: Volume, voxel_xyz: np.ndarray, *, method: str) -
     if method != "linear":
         raise ValueError("MPR sampling method must be nearest or linear.")
     try:
-        from scipy.ndimage import map_coordinates
+        from scipy.ndimage import map_coordinates  # type: ignore[import-untyped]
 
         coords = np.stack((z.ravel(), y.ravel(), x.ravel()), axis=0)
         return np.asarray(map_coordinates(volume.hu, coords, order=1, mode="nearest").reshape(x.shape), dtype=np.float32)
@@ -103,6 +105,38 @@ def _sample_voxel_array(volume: Volume, voxel_xyz: np.ndarray, *, method: str) -
             lps = volume.voxel_to_lps(point_tuple)
             flat[index] = volume.sample(tuple(float(value) for value in lps), method="linear")
         return flat.reshape(x.shape)
+
+
+def _weighted_axis_average(array: np.ndarray, target: int, axis: int) -> np.ndarray:
+    """Average source voxels over each target bin, including fractional edges."""
+
+    source = np.moveaxis(np.asarray(array, dtype=np.float64), axis, 0)
+    source_count = source.shape[0]
+    if target >= source_count:
+        return np.moveaxis(source, 0, axis).astype(np.float32)
+    edges = np.linspace(0.0, float(source_count), target + 1, dtype=np.float64)
+    weights = np.zeros((target, source_count), dtype=np.float64)
+    source_edges = np.arange(source_count + 1, dtype=np.float64)
+    for index in range(target):
+        overlap = np.minimum(source_edges[1:], edges[index + 1]) - np.maximum(source_edges[:-1], edges[index])
+        weights[index] = np.clip(overlap, 0.0, None)
+        width = edges[index + 1] - edges[index]
+        if width <= 0:
+            raise ValueError("Preview target bins must have positive extent.")
+        weights[index] /= width
+    averaged = np.tensordot(weights, source, axes=(1, 0))
+    return np.moveaxis(averaged, 0, axis).astype(np.float32)
+
+
+def _block_average(array: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    """Deterministically downsample a signed-HU volume by physical block means."""
+
+    if len(target_shape) != 3 or any(item < 1 for item in target_shape):
+        raise ValueError("Preview target shape must contain three positive dimensions.")
+    result = np.asarray(array, dtype=np.float32)
+    for axis, target in enumerate(target_shape):
+        result = _weighted_axis_average(result, int(target), axis)
+    return result
 
 
 def request_mpr_plane(
@@ -179,10 +213,17 @@ def request_volume_preview(
     volume: Volume,
     *,
     max_dimension: int = 128,
-    method: str = "nearest",
+    method: str = "average",
     cancellation: CancellationToken | None = None,
 ) -> VolumePreview:
-    """Create a deterministic display-only pyramid level from the scientific source."""
+    """Create a deterministic display-only pyramid level from the scientific source.
+
+    Quantitative HU previews use a block average by default.  The source array is
+    never modified and remains the only input to scientific sampling.  Nearest
+    and linear modes remain available for explicitly requested display behavior,
+    but are not the default because they can preferentially select a single HU
+    voxel when a pyramid level represents a larger physical region.
+    """
 
     if max_dimension < 2:
         raise ValueError("Preview max_dimension must be at least two.")
@@ -194,7 +235,9 @@ def request_volume_preview(
     elif method == "nearest":
         indices = [np.rint(np.linspace(0, size - 1, int(target))).astype(np.int64) for size, target in zip(source_shape, target_shape, strict=True)]
         array = volume.hu[np.ix_(*indices)].astype(np.float32)
-    else:
+    elif method == "average":
+        array = _block_average(volume.hu, cast(tuple[int, int, int], tuple(int(item) for item in target_shape)))
+    elif method == "linear":
         try:
             from scipy.ndimage import zoom
 
@@ -202,10 +245,13 @@ def request_volume_preview(
         except ImportError:
             indices = [np.rint(np.linspace(0, size - 1, int(target))).astype(np.int64) for size, target in zip(source_shape, target_shape, strict=True)]
             array = volume.hu[np.ix_(*indices)].astype(np.float32)
+    else:
+        raise ValueError("Preview resampling method must be average, nearest, or linear.")
     spacing = cast(Vec3, tuple(float(size * step / target) for size, step, target in zip(source_shape, volume.spacing_mm, target_shape, strict=True)))
     if cancellation:
         cancellation.checkpoint()
-    return VolumePreview(array, spacing, volume.shape_zyx, volume.source_hash, max_dimension)
+    resampling = {"average": "block_average_signed_hu", "nearest": "nearest_signed_hu", "linear": "linear_signed_hu"}[method]
+    return VolumePreview(array, spacing, volume.shape_zyx, volume.source_hash, max_dimension, resampling)
 
 
 def build_volume_cache(

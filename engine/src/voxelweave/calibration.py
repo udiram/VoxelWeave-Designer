@@ -28,6 +28,7 @@ class CalibrationBinding:
     reconstruction: str
     flow_mm3_s: float = 1.0
     flow_mm3_per_min: float | None = None
+    material_density_g_cm3: float | None = None
 
     @property
     def effective_flow_mm3_s(self) -> float:
@@ -47,6 +48,7 @@ class CalibrationBinding:
                 "reconstruction": self.reconstruction,
                 "flow_mm3_s": self.flow_mm3_s,
                 "flow_mm3_per_min": self.flow_mm3_per_min,
+                "material_density_g_cm3": self.material_density_g_cm3,
             }
         ))
 
@@ -75,6 +77,10 @@ class Calibration:
             raise CalibrationMismatchError("Calibration requires at least two width/HU points of equal length.")
         if self.binding.effective_flow_mm3_s <= 0:
             raise CalibrationMismatchError("Calibration flow must be positive.")
+        if self.binding.material_density_g_cm3 is not None and (
+            not np.isfinite(self.binding.material_density_g_cm3) or self.binding.material_density_g_cm3 <= 0
+        ):
+            raise CalibrationMismatchError("Calibration material density must be finite and positive when supplied.")
         if not np.all(np.isfinite(widths)) or not np.all(np.isfinite(hu)):
             raise CalibrationMismatchError("Calibration contains non-finite width or HU values.")
         if np.any(widths <= 0) or np.any(np.diff(widths) <= 0):
@@ -101,6 +107,7 @@ class Calibration:
             reconstruction=str(binding_data["reconstruction"]),
             flow_mm3_s=float(binding_data.get("flow_mm3_s", 1.0)),
             flow_mm3_per_min=(float(binding_data["flow_mm3_per_min"]) if "flow_mm3_per_min" in binding_data and "flow_mm3_s" not in binding_data else None),
+            material_density_g_cm3=(float(binding_data["material_density_g_cm3"]) if binding_data.get("material_density_g_cm3") is not None else None),
         )
         return cls(
             calibration_id=str(value["calibration_id"]),

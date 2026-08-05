@@ -7,6 +7,7 @@ from threading import Event
 
 import pytest
 
+from voxelweave import create_synthetic_volume
 from voxelweave.engine import EngineSession
 from voxelweave.errors import CancellationError, DicomValidationError, ProtocolError
 from voxelweave.protocol import MAX_ARRAY_ITEMS, MAX_JSONL_BYTES, ControlEnvelope, Operation
@@ -98,3 +99,27 @@ def test_engine_session_context_cleans_scoped_workspace(tmp_path: Path) -> None:
         assert workspace.exists()
     assert not workspace.exists()
     assert tmp_path.exists()
+
+
+def test_create_selection_accepts_exact_native_transport_payload() -> None:
+    session = EngineSession()
+    session.source = "native-fixture"
+    session.volume = create_synthetic_volume(pattern="uniform", shape_zyx=(6, 8, 8), hu_min=0, hu_max=100)
+    payload = {
+        "source": "native-fixture",
+        "series_uid": session.volume.series_uid,
+        "plane": "axial",
+        "mode": "tile",
+        "start_index": 1,
+        "end_index": 2,
+        "thickness_mm": 1.5,
+        "print_size_mm": [6, 6, 1.5],
+        "layer_height_mm": 0.5,
+        "stride": 1,
+        "resampling": "trilinear",
+        "plate_layout": {"tile_spacing_mm": [2, 2]},
+        "structural_regions": [{"id": "lung", "owner": "T0:measurement"}],
+    }
+    manifest = session.handle(ControlEnvelope("native-selection", Operation.CREATE_PRINT_SELECTION, payload))
+    assert manifest["print_size_mm"][2] == 1.5
+    assert manifest["structural_regions"][-1]["region"] == "measurement_roi"

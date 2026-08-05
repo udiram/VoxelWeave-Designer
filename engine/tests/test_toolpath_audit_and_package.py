@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,24 @@ def _generate() -> object:
     return generate_toolpath(selection, _calibration(), profile=PrinterProfile(sample_step_mm=4.0))
 
 
+def _calibration_for_tool(tool: str, calibration_id: str, *, density: float | None = None) -> Calibration:
+    base = _calibration()
+    binding = CalibrationBinding(
+        pitch_mm=base.binding.pitch_mm,
+        layer_height_mm=base.binding.layer_height_mm,
+        nozzle_mm=base.binding.nozzle_mm,
+        tool=tool,
+        material=f"{tool} PLA",
+        lot=base.binding.lot,
+        printer=base.binding.printer,
+        scanner=base.binding.scanner,
+        reconstruction=base.binding.reconstruction,
+        flow_mm3_s=base.binding.effective_flow_mm3_s,
+        material_density_g_cm3=density,
+    )
+    return Calibration(calibration_id=calibration_id, binding=binding, commanded_width_mm=base.commanded_width_mm, measured_hu_mean=base.measured_hu_mean)
+
+
 def test_calibration_range_and_toolpath_preview_audit() -> None:
     calibration = _calibration()
     with pytest.raises(CalibrationMismatchError, match="outside calibration range"):
@@ -85,6 +104,8 @@ def test_preview_resolution_does_not_change_gcode_and_package_is_deterministic(t
     assert first["hashes"] == second["hashes"]
     assert (tmp_path / "one" / "toolpath.gcode").read_bytes() == (tmp_path / "two" / "toolpath.gcode").read_bytes()
     assert first["audit"]["passed"]
+    assert first["package_name"] == "run-package.zip"
+    assert (tmp_path / "one" / "run-package.zip").is_file()
 
 
 def test_volumetric_flow_cap_wins_over_minimum_speed_preference() -> None:
@@ -118,3 +139,46 @@ def test_clipping_requires_acknowledgement_and_is_reported() -> None:
     assert generated.report["clipping"]["occurred"] is True
     assert generated.report["clipping"]["acknowledged"] is True
     assert generated.audit().passed
+
+
+def test_multi_tool_dispatch_requires_ownership_and_audits_tool_changes(tmp_path: Path) -> None:
+    volume = create_synthetic_volume(pattern="ramp", shape_zyx=(6, 10, 10), hu_min=-700, hu_max=700)
+    selection = create_print_selection(
+        volume,
+        plane="axial",
+        mode="continuous",
+        start_index=1,
+        end_index=4,
+        layer_height_mm=0.5,
+        print_size_mm=(8.0, 8.0, 2.0),
+        structural_regions=(
+            {"id": "left", "region": "measurement_roi", "owner": "T0", "bounds_mm": [0, 0, 4, 8]},
+            {"id": "right", "region": "measurement_roi", "owner": "T1", "bounds_mm": [4, 0, 8, 8]},
+        ),
+    )
+    t0 = _calibration_for_tool("T0", "cal-T0", density=1.2)
+    t1 = _calibration_for_tool("T1", "cal-T1", density=None)
+    generated = generate_toolpath(selection, [t0, t1], profile=PrinterProfile(sample_step_mm=4.0))
+    assert {segment.tool for segment in generated.segments} == {"T0", "T1"}
+    assert generated.report["tool_change_count"] > 0
+    assert generated.report["estimated"]["per_tool"]["T0"]["mass_g"] is not None
+    assert generated.report["estimated"]["per_tool"]["T1"]["mass_g"] is None
+    assert generated.audit().passed
+    package = export_run_package(generated, tmp_path / "multi")
+    trace_path = tmp_path / "multi" / "toolpath_trace.bin"
+    from voxelweave.binary import read_binary_array
+
+    trace, _trace_header = read_binary_array(trace_path)
+    tool_names = tuple(sorted({segment.tool for segment in generated.segments}))
+    assert set(trace["tool"].tolist()) == {tool_names.index(segment.tool) for segment in generated.segments}
+    assert trace["tool"].tolist() == [tool_names.index(segment.tool) for segment in generated.segments]
+    report = json.loads((tmp_path / "multi" / "run_report.json").read_text(encoding="utf-8"))
+    assert report["estimated"]["source"] == "emitted_audited_segments"
+    assert package["tool_id_encoding"] == {str(index): name for index, name in enumerate(tool_names)}
+
+
+def test_multi_tool_generation_fails_without_explicit_region_ownership() -> None:
+    volume = create_synthetic_volume(pattern="uniform", shape_zyx=(5, 8, 8), hu_min=-100, hu_max=100)
+    selection = create_print_selection(volume, plane="axial", mode="continuous", start_index=1, end_index=2, layer_height_mm=0.5, print_size_mm=(6, 6, 1.0))
+    with pytest.raises(CalibrationMismatchError, match="implicit multi-tool dispatch"):
+        generate_toolpath(selection, [_calibration_for_tool("T0", "a"), _calibration_for_tool("T1", "b")], profile=PrinterProfile(sample_step_mm=3.0))

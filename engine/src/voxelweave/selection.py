@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -67,6 +67,7 @@ class SelectionManifest:
     plate_layout: dict[str, Any]
     structural_regions: tuple[dict[str, Any], ...]
     source_hash: str
+    tile_thickness_mode: str = "repeat"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +86,7 @@ class SelectionManifest:
             "plate_layout": canonicalize(self.plate_layout),
             "structural_regions": [canonicalize(item) for item in self.structural_regions],
             "source_hash": self.source_hash,
+            "tile_thickness_mode": self.tile_thickness_mode,
             "physical_fidelity_claim": "not_established_by_software",
         }
 
@@ -103,6 +105,7 @@ class PrintSelection:
     plate_layout: dict[str, Any]
     structural_regions: tuple[dict[str, Any], ...]
     manifest: SelectionManifest
+    tile_thickness_mode: Literal["repeat", "resample"] = "repeat"
 
     @property
     def layer_count(self) -> int:
@@ -161,6 +164,10 @@ class PrintSelection:
             chosen = tile_index if tile_index is not None else 0
             if chosen < 0 or chosen >= len(self.selected_source_indices):
                 raise GeometryValidationError("Tile index is outside the inclusive tile selection.")
+            # A tile is a selected source plane repeated through the requested
+            # physical thickness.  ``resample`` is explicit for future slab
+            # interpolation; it currently shares the same source-plane center
+            # contract so no unselected anatomy can leak into a tile.
             source[axes[2]] = float(self.selected_source_indices[chosen])
         return source
 
@@ -211,11 +218,18 @@ def create_print_selection(
     stride: int = 1,
     plate_layout: dict[str, Any] | None = None,
     labels: Sequence[str] | None = None,
+    structural_regions: Sequence[Mapping[str, Any]] | None = None,
+    structural_markers: Sequence[Mapping[str, Any]] | None = None,
+    tile_thickness_mode: Literal["repeat", "resample"] = "repeat",
+    build_volume_mm: Vec3 | None = None,
+    resampling: str | None = None,
 ) -> PrintSelection:
     if mode not in {"single", "continuous", "tile"}:
         raise GeometryValidationError("Selection mode must be single, continuous, or tile.")
     if layer_height_mm <= 0 or stride <= 0:
         raise GeometryValidationError("Layer height and tile stride must be positive.")
+    if tile_thickness_mode not in {"repeat", "resample"}:
+        raise GeometryValidationError("Tile thickness mode must be repeat or resample.")
     low, high = _source_bounds_from_crop(volume, crop_min_lps, crop_max_lps)
     axes = _axis_map(plane)
     normal_axis = axes[2]
@@ -239,7 +253,9 @@ def create_print_selection(
         if not selected_indices:
             raise GeometryValidationError("Selected source range produced no planes.")
         axis_spacing = volume.spacing_mm[2 - normal_axis]
-        depth_mm = axis_spacing if mode == "tile" else float((end - start + 1) * axis_spacing)
+        depth_mm = (float(thickness_mm) if thickness_mm is not None else axis_spacing) if mode == "tile" else float((end - start + 1) * axis_spacing)
+        if depth_mm <= 0 or not math.isfinite(depth_mm):
+            raise GeometryValidationError("Tile thickness must be finite and positive.")
         crop_start = int(math.ceil(low[normal_axis] - 1e-6))
         crop_end = int(math.floor(high[normal_axis] + 1e-6))
         if start < crop_start or end > crop_end:
@@ -254,19 +270,66 @@ def create_print_selection(
     requested_size = cast(Vec3, tuple(float(item) for item in requested_size))
     plate = dict(plate_layout or {})
     if mode == "tile":
-        columns = max(1, int(plate.get("columns", min(len(selected_indices), 4))))
-        plate.setdefault("columns", columns)
-        plate.setdefault("rows", int(math.ceil(len(selected_indices) / columns)))
-        plate.setdefault("tile_spacing_mm", [2.0, 2.0])
-        plate.setdefault("tile_size_mm", [requested_size[0], requested_size[1]])
-    structural = tuple(
+        try:
+            columns = int(plate.get("columns", min(len(selected_indices), 4)))
+            rows = int(plate.get("rows", math.ceil(len(selected_indices) / max(columns, 1))))
+            spacing = tuple(float(item) for item in plate.get("tile_spacing_mm", [2.0, 2.0]))
+        except (TypeError, ValueError):
+            raise GeometryValidationError("Tile plate columns, rows, and spacing must be numeric.") from None
+        if columns <= 0 or rows <= 0 or len(spacing) != 2 or any(item < 0 or not math.isfinite(item) for item in spacing):
+            raise GeometryValidationError("Tile plate columns, rows, and spacing are invalid.")
+        if rows * columns < len(selected_indices):
+            raise GeometryValidationError("Tile plate layout cannot contain all selected tiles.")
+        raw_tile_size = plate.get("tile_size_mm", [requested_size[0], requested_size[1]])
+        if not isinstance(raw_tile_size, (list, tuple)) or len(raw_tile_size) != 2:
+            raise GeometryValidationError("Tile plate tile_size_mm must contain two dimensions.")
+        tile_size = tuple(float(item) for item in raw_tile_size)
+        if any(item <= 0 or not math.isfinite(item) for item in tile_size):
+            raise GeometryValidationError("Tile plate tile_size_mm must contain positive finite dimensions.")
+        plate["columns"] = columns
+        plate["rows"] = rows
+        plate["tile_spacing_mm"] = list(spacing)
+        plate["tile_size_mm"] = list(tile_size)
+        if build_volume_mm is not None:
+            if len(build_volume_mm) != 3 or any(float(item) <= 0 or not math.isfinite(float(item)) for item in build_volume_mm):
+                raise GeometryValidationError("Build volume must contain three positive finite dimensions.")
+            footprint_x = columns * tile_size[0] + (columns - 1) * spacing[0]
+            footprint_y = rows * tile_size[1] + (rows - 1) * spacing[1]
+            if footprint_x > float(build_volume_mm[0]) + 1e-6 or footprint_y > float(build_volume_mm[1]) + 1e-6:
+                raise GeometryValidationError("Tile plate layout exceeds the configured build volume.")
+
+    provided_structural: list[dict[str, Any]] = []
+    for item in tuple(structural_regions or ()) + tuple(structural_markers or ()):
+        if not isinstance(item, Mapping):
+            raise GeometryValidationError("Structural regions must be objects with explicit ownership.")
+        owner = str(item.get("owner", "")).strip()
+        region = str(item.get("region", item.get("id", ""))).strip()
+        measurement_owned = "measurement" in region.lower() or ":measurement" in owner.lower()
+        if not region:
+            raise GeometryValidationError("Every scene/structural region requires a non-empty id or region.")
+        if not measurement_owned and region == "measurement_roi":
+            raise GeometryValidationError("Structural regions must remain outside the measurement ROI.")
+        normalized = {str(key): value for key, value in item.items()}
+        normalized["region"] = "measurement_roi" if measurement_owned else region
+        normalized.setdefault("owner", owner or ("measurement" if measurement_owned else "structure"))
+        normalized.setdefault("structural", not measurement_owned)
+        marker_type = normalized.get("marker_type", normalized.get("type", normalized.get("kind")))
+        if marker_type is not None and str(marker_type).lower() in {"label", "orientation", "orientation_marker", "notch", "tab", "anchor"}:
+            normalized["marker_type"] = str(marker_type).lower()
+        provided_structural.append(normalized)
+    generated_structural = [
         {
+            "id": f"tile-label-{index + 1:03d}",
             "label": labels[index] if labels and index < len(labels) else f"tile-{index + 1:03d}",
             "tile_index": index,
             "region": "structural_outside_measurement_roi",
+            "owner": "structure",
+            "marker_type": "label",
+            "structural": True,
         }
         for index in range(len(selected_indices))
-    ) if mode == "tile" else ()
+    ] if mode == "tile" else []
+    structural = tuple(generated_structural + provided_structural)
     sample_low = low.copy()
     sample_high = high.copy()
     if mode == "continuous":
@@ -288,9 +351,10 @@ def create_print_selection(
         print_size_mm=requested_size,
         layer_height_mm=float(layer_height_mm),
         source_to_print_transform=transform,
-        resampling="full_resolution_signed_hu_at_printer_layer_centers" if mode == "continuous" else "full_resolution_signed_hu_plane_sampling",
+        resampling=resampling or ("full_resolution_signed_hu_at_printer_layer_centers" if mode == "continuous" else "full_resolution_signed_hu_plane_sampling"),
         plate_layout=plate,
         structural_regions=structural,
         source_hash=volume.source_hash,
+        tile_thickness_mode=tile_thickness_mode,
     )
-    return PrintSelection(volume, plane, mode, low, high, selected_indices, requested_size, float(layer_height_mm), stride, plate, structural, manifest)
+    return PrintSelection(volume, plane, mode, low, high, selected_indices, requested_size, float(layer_height_mm), stride, plate, structural, manifest, tile_thickness_mode)

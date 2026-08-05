@@ -32,6 +32,19 @@ def test_mpr_planes_use_physical_source_and_preview_is_derived() -> None:
     assert sum(histogram["counts"]) == int(np.prod(volume.shape_zyx))
 
 
+def test_preview_defaults_to_block_average_and_preserves_source() -> None:
+    from voxelweave.dicom import Volume
+
+    source = np.arange(64, dtype=np.float32).reshape(4, 4, 4)
+    volume = Volume(source.copy(), (1.0, 1.0, 1.0), np.zeros(3), np.eye(3), "preview-average")
+    before = volume.hu.copy()
+    preview = request_volume_preview(volume, max_dimension=2)
+    expected = source.reshape(2, 2, 2, 2, 2, 2).mean(axis=(1, 3, 5))
+    np.testing.assert_allclose(preview.array, expected)
+    assert preview.to_dict()["resampling"] == "block_average_signed_hu"
+    np.testing.assert_array_equal(volume.hu, before)
+
+
 def test_continuous_tile_and_single_selection_contracts() -> None:
     volume = create_synthetic_volume(pattern="ramp", shape_zyx=(8, 8, 8), spacing_mm=(1.0, 1.0, 1.0), hu_min=0, hu_max=700)
     continuous = create_print_selection(

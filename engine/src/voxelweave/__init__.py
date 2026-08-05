@@ -41,6 +41,7 @@ from .mpr import (
     sample_voxel,
 )
 from .protocol import ControlEnvelope, Operation, encode_jsonl, parse_jsonl
+from .release import release_dependency_status, require_release_dependencies
 from .scanback import ScanBackVerification, verify_scan_back
 from .selection import PrintSelection, SelectionManifest, create_print_selection
 from .synthetic import (
@@ -97,6 +98,8 @@ __all__ = [
     "load_dicom_series",
     "parse_jsonl",
     "read_binary_array",
+    "release_dependency_status",
+    "require_release_dependencies",
     "request_mpr_plane",
     "request_volume_preview",
     "reverse_audit_gcode",

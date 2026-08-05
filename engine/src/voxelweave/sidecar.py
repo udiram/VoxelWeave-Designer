@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from contextlib import suppress
 from threading import Lock, Thread
@@ -12,10 +13,14 @@ from .engine import EngineSession
 from .errors import EngineError
 from .models import ProgressEvent, canonicalize
 from .protocol import MAX_JSONL_BYTES, ControlEnvelope, Operation
+from .release import require_release_dependencies
 
 
 def serve_jsonl(input_stream: TextIO, output_stream: TextIO) -> None:
     """Serve bounded control envelopes from stdin and write bounded events to stdout."""
+
+    if os.environ.get("VOXELWEAVE_RELEASE_MODE") == "1":
+        require_release_dependencies(require_arm64=False)
 
     session = EngineSession()
     output_lock = Lock()

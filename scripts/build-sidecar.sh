@@ -56,6 +56,24 @@ venv="$build_root/venv"
 venv_python="$venv/bin/python"
 "$venv_python" -m pip install --disable-pip-version-check --upgrade pip >/dev/null
 "$venv_python" -m pip install --disable-pip-version-check -e 'engine[release]' >/dev/null
+VOXELWEAVE_RELEASE_MODE=1 "$venv_python" - <<'PY'
+from voxelweave.release import require_release_dependencies
+
+dependencies = require_release_dependencies(require_arm64=True)
+for name, location in sorted(dependencies.items()):
+    print(f"[sidecar] dependency={name} path={location}")
+PY
+
+# Fail closed if a native extension in the release environment is not an
+# Apple-Silicon binary.  A Python package import alone can succeed while its
+# extension silently falls back to an incompatible architecture.
+while IFS= read -r -d '' native_file; do
+  native_description="$(file -Lb "$native_file")"
+  [[ "$native_description" == *arm64* ]] || {
+    echo "error: release dependency extension is not arm64: $native_file ($native_description)" >&2
+    exit 1
+  }
+done < <(find "$venv" -type f \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' \) -print0)
 
 "$venv_python" -m PyInstaller \
   --noconfirm \

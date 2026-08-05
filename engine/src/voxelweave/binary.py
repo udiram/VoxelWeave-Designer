@@ -53,6 +53,8 @@ def write_binary_array(
         "payload_bytes": len(payload),
         "payload_sha256": _payload_sha256(payload),
     }
+    if source.dtype.fields:
+        header["dtype_descr"] = source.dtype.descr
     if metadata:
         header.update(canonicalize(metadata))
     encoded = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -101,7 +103,10 @@ def read_binary_array(path: str | Path) -> tuple[np.ndarray, dict[str, Any]]:
     if digest != header.get("payload_sha256"):
         raise EngineError("Binary artifact SHA-256 does not match its payload.")
     try:
-        dtype = np.dtype(str(header["dtype"]))
+        descriptor = header.get("dtype_descr")
+        if isinstance(descriptor, list):
+            descriptor = [tuple(item) if isinstance(item, list) else item for item in descriptor]
+        dtype = np.dtype(descriptor if descriptor is not None else str(header["dtype"]))
         shape = tuple(int(item) for item in header["shape"])
     except (KeyError, TypeError, ValueError) as exc:
         raise EngineError("Binary artifact dtype or shape metadata is invalid.") from exc

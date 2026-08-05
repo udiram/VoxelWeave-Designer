@@ -6,10 +6,11 @@ import hashlib
 import json
 import math
 import re
+import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -124,6 +125,7 @@ class AuditReport:
     segment_count: int
     extrusion_move_count: int
     tool_changes: tuple[str, ...]
+    tool_change_count: int
     bounds_xyz: tuple[Vec3, Vec3] | None
     checked_expected_segments: int
 
@@ -137,6 +139,7 @@ class AuditReport:
             "segment_count": self.segment_count,
             "extrusion_move_count": self.extrusion_move_count,
             "tool_changes": list(self.tool_changes),
+            "tool_change_count": self.tool_change_count,
             "bounds_xyz": None if self.bounds_xyz is None else [list(self.bounds_xyz[0]), list(self.bounds_xyz[1])],
             "checked_expected_segments": self.checked_expected_segments,
         }
@@ -200,7 +203,10 @@ def _line_segments(start: float, end: float, step_mm: float) -> list[tuple[float
     return [(start + index * increment, start + (index + 1) * increment) for index in range(count)]
 
 
-def _resolve_calibration(calibration: Calibration | CalibrationSet | Mapping[str, Calibration], tool: str | None = None) -> Calibration:
+CalibrationInput = Calibration | CalibrationSet | Mapping[str, Calibration] | Sequence[Calibration]
+
+
+def _resolve_calibration(calibration: CalibrationInput, tool: str | None = None) -> Calibration:
     if isinstance(calibration, Calibration):
         result = calibration
     elif isinstance(calibration, CalibrationSet):
@@ -213,13 +219,140 @@ def _resolve_calibration(calibration: Calibration | CalibrationSet | Mapping[str
             if len(matches) != 1:
                 raise CalibrationMismatchError("Generation requires exactly one accepted calibration for the selected tool.")
             result = matches[0]
-    else:
+    elif isinstance(calibration, Mapping):
         if tool is None or tool not in calibration:
             raise CalibrationMismatchError("Generation requires an explicit calibration for the selected tool.")
         result = calibration[tool]
+    else:
+        values = tuple(calibration)
+        if tool is None and len(values) == 1:
+            result = values[0]
+        else:
+            matches = [item for item in values if item.binding.tool == tool]
+            if len(matches) != 1:
+                raise CalibrationMismatchError("Generation requires exactly one accepted calibration for the selected tool.")
+            result = matches[0]
     if not result.accepted:
         raise CalibrationMismatchError("Generation cannot use an unaccepted calibration.")
     return result
+
+
+def _calibration_by_tool(calibration: CalibrationInput) -> dict[str, Calibration]:
+    if isinstance(calibration, Calibration):
+        return {calibration.binding.tool: calibration}
+    if isinstance(calibration, CalibrationSet):
+        values = tuple(calibration.calibrations)
+    elif isinstance(calibration, Mapping):
+        values = tuple(calibration.values())
+    else:
+        values = tuple(calibration)
+    result: dict[str, Calibration] = {}
+    for item in values:
+        tool_name = item.binding.tool
+        if tool_name in result and result[tool_name].calibration_id != item.calibration_id:
+            raise CalibrationMismatchError(f"More than one accepted calibration is bound to tool {tool_name}.")
+        result[tool_name] = item
+    if not result:
+        raise CalibrationMismatchError("At least one accepted calibration is required.")
+    return result
+
+
+def _owner_tool(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    token = text.split(":", 1)[0].strip()
+    return token if re.fullmatch(r"T\d+", token) else None
+
+
+def _region_bounds(region: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
+    candidate = region.get("bounds_mm") or region.get("bounds")
+    if isinstance(candidate, Mapping):
+        values = (candidate.get("x_min"), candidate.get("y_min"), candidate.get("x_max"), candidate.get("y_max"))
+    elif isinstance(candidate, (list, tuple)) and len(candidate) == 4:
+        values = tuple(candidate)
+    elif isinstance(region.get("x_range_mm"), (list, tuple)) and isinstance(region.get("y_range_mm"), (list, tuple)):
+        x_range = cast(Sequence[Any], region["x_range_mm"])
+        y_range = cast(Sequence[Any], region["y_range_mm"])
+        if len(x_range) != 2 or len(y_range) != 2:
+            raise GeometryValidationError("Region x_range_mm and y_range_mm must contain two coordinates each.")
+        values = (x_range[0], y_range[0], x_range[1], y_range[1])
+    else:
+        values = (
+            region.get("x_min_mm", region.get("min_x_mm")),
+            region.get("y_min_mm", region.get("min_y_mm")),
+            region.get("x_max_mm", region.get("max_x_mm")),
+            region.get("y_max_mm", region.get("max_y_mm")),
+        )
+    if any(item is None for item in values):
+        return None
+    try:
+        result = tuple(float(cast(Any, item)) for item in values)
+    except (TypeError, ValueError):
+        raise GeometryValidationError("Region bounds must contain four finite coordinates.") from None
+    if len(result) != 4 or not all(math.isfinite(item) for item in result) or result[2] <= result[0] or result[3] <= result[1]:
+        raise GeometryValidationError("Region bounds must be finite and increasing.")
+    return result
+
+
+def _dispatch_regions(selection: PrintSelection, scene: Mapping[str, Any] | None) -> tuple[dict[str, Any], ...]:
+    """Return explicit region/tool ownership for deterministic multi-tool dispatch."""
+
+    values: list[dict[str, Any]] = []
+    for item in selection.structural_regions:
+        if isinstance(item, Mapping):
+            values.append(dict(item))
+    if scene is not None:
+        scene_regions = scene.get("regions", [])
+        if not isinstance(scene_regions, list):
+            raise GeometryValidationError("Scene regions must be an array for tool dispatch.")
+        values.extend(dict(item) for item in scene_regions if isinstance(item, Mapping))
+    normalized: list[dict[str, Any]] = []
+    for item in values:
+        owner = _owner_tool(item.get("tool") or item.get("owner"))
+        region_name = str(item.get("region") or item.get("id") or "").strip()
+        if owner is None or not region_name:
+            continue
+        if "measurement" in region_name.lower() or ":measurement" in str(item.get("owner", "")).lower():
+            region_name = "measurement_roi"
+        normalized.append({"region": region_name, "tool": owner, "bounds": _region_bounds(item), "owner": str(item.get("owner", owner))})
+    return tuple(normalized)
+
+
+def _tool_for_sample(
+    *,
+    x_mm: float,
+    y_mm: float,
+    default_region: str,
+    available_tools: Mapping[str, Calibration],
+    regions: Sequence[Mapping[str, Any]],
+    explicit_tool: str | None,
+) -> str:
+    if explicit_tool is not None:
+        if explicit_tool not in available_tools:
+            raise CalibrationMismatchError(f"No accepted calibration is bound to explicit tool {explicit_tool}.")
+        return explicit_tool
+    matches: list[str] = []
+    for item in regions:
+        bounds = item.get("bounds")
+        if bounds is not None:
+            low_x, low_y, high_x, high_y = cast(tuple[float, float, float, float], bounds)
+            if low_x - 1e-9 <= x_mm <= high_x + 1e-9 and low_y - 1e-9 <= y_mm <= high_y + 1e-9:
+                matches.append(str(item["tool"]))
+        elif str(item.get("region")) in {default_region, "measurement", "measurement_roi", "measurement_roi_tile"}:
+            matches.append(str(item["tool"]))
+    unique = tuple(dict.fromkeys(matches))
+    if len(unique) == 1:
+        if unique[0] not in available_tools:
+            raise CalibrationMismatchError(f"No accepted calibration is bound to explicitly owned tool {unique[0]}.")
+        return unique[0]
+    if len(unique) > 1:
+        raise CalibrationMismatchError(f"Region ownership is ambiguous at print coordinate ({x_mm:g}, {y_mm:g}).")
+    if len(available_tools) == 1:
+        return next(iter(available_tools))
+    raise CalibrationMismatchError(
+        f"No explicit calibration ownership covers measurement region {default_region}; refusing implicit multi-tool dispatch."
+    )
 
 
 def _profile_binding(selection: PrintSelection, calibration: Calibration, profile: PrinterProfile) -> CalibrationBinding:
@@ -271,8 +404,9 @@ def _format_gcode(
     source_hash: str,
     *,
     layer_height_mm: float,
-    calibration_flow_mm3_s: float,
+    calibration_flows_mm3_s: Mapping[str, float],
 ) -> str:
+    first_flow = next(iter(calibration_flows_mm3_s.values()))
     lines = [
         "; VoxelWeave Designer research-use deterministic toolpath",
         "; VW_BEGIN",
@@ -290,7 +424,7 @@ def _format_gcode(
         f"; VW_PARK_AFTER_PRINT={int(profile.park_after_print)}",
         f"; VW_PARK_POSITION_MM={profile.park_position_mm[0]:.5f},{profile.park_position_mm[1]:.5f},{profile.park_position_mm[2]:.5f}",
         f"; VW_MAX_FLOW_MM3_S={profile.max_flow_mm3_s:.9g}",
-        f"; VW_CALIBRATION_FLOW_MM3_S={calibration_flow_mm3_s:.9g}",
+        f"; VW_CALIBRATION_FLOW_MM3_S={first_flow:.9g}",
         f"; VW_LAYER_HEIGHT_MM={layer_height_mm:.9g}",
         f"; VW_FILAMENT_DIAMETER_MM={profile.filament_diameter_mm:.9g}",
         "; VW_SCIENTIFIC_BOUNDARY=software_audit_does_not_establish_physical_fidelity",
@@ -299,6 +433,8 @@ def _format_gcode(
         "G21",
         "G92 E0",
     ]
+    for flow_tool in sorted(calibration_flows_mm3_s):
+        lines.insert(20, f"; VW_CALIBRATION_FLOW_MM3_S_{flow_tool}={calibration_flows_mm3_s[flow_tool]:.9g}")
     if profile.home_before_print:
         lines.append("G28")
     if profile.heat_bed:
@@ -312,7 +448,7 @@ def _format_gcode(
         prime_width = max(profile.min_line_width_mm, min(profile.max_line_width_mm, profile.filament_diameter_mm * 0.5))
         prime_feed = min(
             profile.max_print_speed_mm_min,
-            min(profile.max_flow_mm3_s, calibration_flow_mm3_s) * 60.0 / max(prime_width * layer_height_mm, 1e-9),
+            min(profile.max_flow_mm3_s, first_flow) * 60.0 / max(prime_width * layer_height_mm, 1e-9),
         )
         prime_feed = math.floor(prime_feed * 1000.0) / 1000.0
         prime_e = profile.prime_length_mm * prime_width * layer_height_mm / (math.pi * (profile.filament_diameter_mm / 2.0) ** 2)
@@ -334,7 +470,11 @@ def _format_gcode(
     previous_z: float | None = None
     for segment in segments:
         if current_tool != segment.tool:
+            if current_tool is not None:
+                lines.append(f"; VW_TOOL_CHANGE from={current_tool} to={segment.tool} safe=1")
+                lines.append(f"G0 X0.00000 Y0.00000 Z{min(5.0, profile.build_volume_mm[2]):.5f}")
             lines.append(f"{segment.tool}")
+            lines.append(f"; VW_TOOL_FLOW tool={segment.tool} mm3_s={calibration_flows_mm3_s[segment.tool]:.9g}")
             current_tool = segment.tool
         start_x, start_y = segment.start_xy_mm
         if previous_end is None or previous_z != segment.z_mm or math.hypot(previous_end[0] - start_x, previous_end[1] - start_y) > 1e-7:
@@ -379,10 +519,11 @@ def _preview_records(segments: Sequence[ToolpathSegment], tools: Sequence[str]) 
 
 def generate_toolpath(
     selection: PrintSelection,
-    calibration: Calibration | CalibrationSet | Mapping[str, Calibration],
+    calibration: CalibrationInput,
     *,
     profile: PrinterProfile | None = None,
     tool: str | None = None,
+    scene: Mapping[str, Any] | None = None,
     allow_calibration_clipping: bool = False,
     acknowledge_calibration_clipping: bool = False,
     request_id: str = "toolpath",
@@ -394,30 +535,34 @@ def generate_toolpath(
         raise CalibrationMismatchError(
             "Calibration clipping is fail-closed; set acknowledge_calibration_clipping=True to export clipped output."
         )
-    selected_calibration = _resolve_calibration(calibration, tool)
-    _profile_binding(selection, selected_calibration, profile)
-    pitch = selected_calibration.binding.pitch_mm
-    if pitch <= 0:
-        raise CalibrationMismatchError("Calibration pitch must be positive.")
+    calibrations = _calibration_by_tool(calibration)
+    if tool is not None and tool not in calibrations:
+        raise CalibrationMismatchError(f"No accepted calibration is bound to explicit tool {tool}.")
+    for candidate in calibrations.values():
+        _profile_binding(selection, candidate, profile)
+    regions = _dispatch_regions(selection, scene)
     width_limit = (profile.min_line_width_mm, profile.max_line_width_mm)
     segments: list[ToolpathSegment] = []
     tile_count = len(selection.selected_source_indices) if selection.mode == "tile" else 1
     columns = int(selection.plate_layout.get("columns", tile_count)) if selection.mode == "tile" else 1
     tile_spacing = tuple(float(item) for item in selection.plate_layout.get("tile_spacing_mm", [2.0, 2.0])) if selection.mode == "tile" else (0.0, 0.0)
     tile_size = selection.print_size_mm[:2]
+
     def tile_plate_offset(tile: int) -> tuple[float, float]:
         return (
             (tile % columns) * (tile_size[0] + tile_spacing[0]),
             (tile // columns) * (tile_size[1] + tile_spacing[1]),
         )
-    positions_x = _positions(selection.print_size_mm[0], pitch)
-    positions_y = _positions(selection.print_size_mm[1], pitch)
+
+    positions_x = _positions(selection.print_size_mm[0], min(item.binding.pitch_mm for item in calibrations.values()))
+    positions_y = _positions(selection.print_size_mm[1], min(item.binding.pitch_mm for item in calibrations.values()))
     total_layers = selection.layer_count * tile_count
     completed = 0
     clipped_count = 0
     clipped_by_layer: dict[str, int] = {}
     clipped_by_tile: dict[str, int] = {}
     clipped_by_region: dict[str, int] = {}
+    used_calibrations: dict[str, Calibration] = {}
     for tile_index in range(tile_count):
         offset_x, offset_y = tile_plate_offset(tile_index)
         for layer_index in range(selection.layer_count):
@@ -434,34 +579,36 @@ def generate_toolpath(
                 for a, b in _line_segments(start, end, profile.sample_step_mm):
                     midpoint = (a + b) / 2.0
                     x, y = (midpoint, line_coordinate) if direction_x else (line_coordinate, midpoint)
+                    region_name = "measurement_roi_tile" if selection.mode == "tile" else "measurement_roi"
+                    active_tool = _tool_for_sample(
+                        x_mm=x,
+                        y_mm=y,
+                        default_region=region_name,
+                        available_tools=calibrations,
+                        regions=regions,
+                        explicit_tool=tool,
+                    )
+                    selected_calibration = calibrations[active_tool]
+                    used_calibrations[active_tool] = selected_calibration
+                    pitch = selected_calibration.binding.pitch_mm
                     source_position = selection.rail_sample_position(x, y, z_sample, tile_index=tile_index if selection.mode == "tile" else None)
                     source_hu = selection.sample_hu(x, y, z_sample, tile_index=tile_index if selection.mode == "tile" else None)
                     clipped_hu, widths, range_status = selected_calibration.map_hu(np.asarray([source_hu]), allow_clipping=allow_calibration_clipping)
                     width = float(np.clip(widths[0], width_limit[0], width_limit[1]))
-                    target_hu = source_hu
-                    fill = width / pitch
                     local_start = (a, line_coordinate) if direction_x else (line_coordinate, a)
                     local_end = (b, line_coordinate) if direction_x else (line_coordinate, b)
                     extrusion, feedrate = _extrusion_and_feedrate(
-                        math.hypot(b - a, 0.0),
-                        width,
-                        selection.layer_height_mm,
-                        profile,
-                        selected_calibration.binding.effective_flow_mm3_s,
+                        math.hypot(b - a, 0.0), width, selection.layer_height_mm, profile, selected_calibration.binding.effective_flow_mm3_s
                     )
                     if layer_index == 0:
                         feedrate *= profile.first_layer_speed_scale
-                    # The emitted F field has three decimals.  Round down so
-                    # serialization can never push a legal cap over its hard
-                    # volumetric-flow limit.
                     feedrate = math.floor(feedrate * 1000.0) / 1000.0
                     if range_status == "clipped":
                         clipped_count += 1
                         clipped_by_layer[str(layer_index)] = clipped_by_layer.get(str(layer_index), 0) + 1
                         tile_key = str(tile_index if selection.mode == "tile" else 0)
                         clipped_by_tile[tile_key] = clipped_by_tile.get(tile_key, 0) + 1
-                        region_key = "measurement_roi" if selection.mode != "tile" else "measurement_roi_tile"
-                        clipped_by_region[region_key] = clipped_by_region.get(region_key, 0) + 1
+                        clipped_by_region[region_name] = clipped_by_region.get(region_name, 0) + 1
                     segments.append(
                         ToolpathSegment(
                             segment_index=len(segments),
@@ -472,16 +619,16 @@ def generate_toolpath(
                             z_mm=z_print,
                             source_position_lps=source_position,
                             source_hu=float(source_hu),
-                            target_hu=float(target_hu),
+                            target_hu=float(source_hu),
                             clipped_hu=float(clipped_hu[0]),
                             commanded_width_mm=width,
-                            effective_fill=float(fill),
+                            effective_fill=float(width / pitch),
                             feedrate_mm_min=float(feedrate),
                             extrusion_mm=float(extrusion),
-                            tool=selected_calibration.binding.tool,
+                            tool=active_tool,
                             material=selected_calibration.binding.material,
                             calibration_id=selected_calibration.calibration_id,
-                            region="measurement_roi" if selection.mode != "tile" else "measurement_roi_tile",
+                            region=region_name,
                             range_status=range_status,
                         )
                     )
@@ -492,6 +639,37 @@ def generate_toolpath(
                 progress(ProgressEvent(request_id, "generate_toolpath", "layer", completed, total_layers, "Generating full-resolution toolpath."))
     if not segments:
         raise GeometryValidationError("Selection generated no printable roads.")
+
+    # Requested labels/orientation markers/notches/tabs/anchors are emitted as
+    # short, owned roads outside the measurement stream.  They never sample HU.
+    structural_items = [item for item in selection.structural_regions if item.get("structural") and item.get("marker_type")]
+    for item in structural_items:
+        marker_tool = _owner_tool(item.get("tool") or item.get("owner")) or tool
+        if marker_tool is None:
+            if len(calibrations) != 1:
+                raise CalibrationMismatchError("Structural marker ownership is ambiguous across multiple tools.")
+            marker_tool = next(iter(calibrations))
+        marker_calibration = calibrations.get(marker_tool)
+        if marker_calibration is None:
+            raise CalibrationMismatchError(f"No accepted calibration is bound to structural marker tool {marker_tool}.")
+        marker_type = str(item.get("marker_type"))
+        marker_tile_index = int(item.get("tile_index", -1)) if item.get("tile_index") is not None else None
+        offset_x, offset_y = tile_plate_offset(marker_tile_index) if marker_tile_index is not None and marker_tile_index >= 0 else (0.0, 0.0)
+        marker_length = min(1.0, max(profile.min_line_width_mm * 2.0, tile_size[0] * 0.1))
+        x0 = offset_x + max(0.0, tile_size[0] - marker_length - profile.min_line_width_mm)
+        y0 = offset_y + max(0.0, tile_size[1] - profile.min_line_width_mm)
+        width = float(np.clip(profile.min_line_width_mm, width_limit[0], width_limit[1]))
+        extrusion, feedrate = _extrusion_and_feedrate(marker_length, width, selection.layer_height_mm, profile, marker_calibration.binding.effective_flow_mm3_s)
+        segments.append(
+            ToolpathSegment(
+                segment_index=len(segments), layer_index=0, tile_index=marker_tile_index, start_xy_mm=(x0, y0), end_xy_mm=(x0 + marker_length, y0),
+                z_mm=min(selection.print_size_mm[2], selection.layer_height_mm * 0.5), source_position_lps=selection.rail_sample_position(min(selection.print_size_mm[0] * 0.5, selection.print_size_mm[0]), min(selection.print_size_mm[1] * 0.5, selection.print_size_mm[1]), min(selection.print_size_mm[2], selection.layer_height_mm * 0.5), tile_index=marker_tile_index if selection.mode == "tile" and marker_tile_index is not None else None),
+                source_hu=float(marker_calibration.hu_range[0]), target_hu=float(marker_calibration.hu_range[0]), clipped_hu=float(marker_calibration.hu_range[0]),
+                commanded_width_mm=width, effective_fill=width / marker_calibration.binding.pitch_mm, feedrate_mm_min=float(feedrate), extrusion_mm=float(extrusion),
+                tool=marker_tool, material=marker_calibration.binding.material, calibration_id=marker_calibration.calibration_id, region=f"structural_{marker_type}", range_status="structural",
+            )
+        )
+        used_calibrations[marker_tool] = marker_calibration
     max_x = max(segment.end_xy_mm[0] for segment in segments)
     max_y = max(segment.end_xy_mm[1] for segment in segments)
     max_z = max(segment.z_mm for segment in segments)
@@ -499,19 +677,48 @@ def generate_toolpath(
         raise GeometryValidationError("Generated toolpath exceeds the configured printer build volume.")
     tool_names = tuple(sorted({segment.tool for segment in segments}))
     preview = _preview_records(segments, tool_names)
+    calibration_flows = {tool_name: used_calibrations[tool_name].binding.effective_flow_mm3_s for tool_name in tool_names}
     gcode = _format_gcode(
         segments,
         profile,
         selection.volume.source_hash,
         layer_height_mm=selection.layer_height_mm,
-        calibration_flow_mm3_s=selected_calibration.binding.effective_flow_mm3_s,
+        calibration_flows_mm3_s=calibration_flows,
     )
+    per_tool: dict[str, dict[str, Any]] = {}
+    for tool_name in tool_names:
+        candidate = used_calibrations[tool_name]
+        volume_mm3 = float(sum(segment.length_mm * segment.commanded_width_mm * selection.layer_height_mm for segment in segments if segment.tool == tool_name))
+        density = candidate.binding.material_density_g_cm3
+        per_tool[tool_name] = {
+            "material": candidate.binding.material,
+            "calibration_id": candidate.calibration_id,
+            "volume_mm3": volume_mm3,
+            "material_density_g_cm3": density,
+            "mass_g": None if density is None else volume_mm3 * density / 1000.0,
+            "mass_status": "available" if density is not None else "unavailable_material_density_not_bound",
+        }
+    motion_seconds = float(sum(segment.length_mm / segment.feedrate_mm_min * 60.0 for segment in segments))
+    tool_change_count = sum(1 for previous, current in zip(segments, segments[1:], strict=False) if previous.tool != current.tool)
+    whole_minutes = int(motion_seconds // 60)
+    seconds_remainder = int(round(motion_seconds - whole_minutes * 60))
+    if seconds_remainder >= 60:
+        whole_minutes += seconds_remainder // 60
+        seconds_remainder %= 60
+    estimate = {
+        "print_time_seconds": motion_seconds,
+        "print_time": f"{whole_minutes}m {seconds_remainder:02d}s",
+        "tool_changes": tool_change_count,
+        "per_tool": per_tool,
+        "mass_status": "available" if all(item["mass_g"] is not None for item in per_tool.values()) else "unavailable_material_density_not_bound",
+        "source": "emitted_audited_segments",
+    }
     result = GeneratedToolpath(
         selection=selection,
         segments=tuple(segments),
         gcode_text=gcode,
         preview_records=preview,
-        calibration_ids=(selected_calibration.calibration_id,),
+        calibration_ids=tuple(used_calibrations[name].calibration_id for name in tool_names),
         profile=profile,
         report={
             "schema": "voxelweave.toolpath-report.v1",
@@ -519,7 +726,10 @@ def generate_toolpath(
             "segment_count": len(segments),
             "layer_count": selection.layer_count,
             "tile_count": tile_count,
-            "calibration_ids": [selected_calibration.calibration_id],
+            "calibration_ids": [used_calibrations[name].calibration_id for name in tool_names],
+            "tools": list(tool_names),
+            "estimated": estimate,
+            "tool_change_count": tool_change_count,
             "preview_is_non_authoritative": True,
             "clipping": {
                 "occurred": clipped_count > 0,
@@ -602,6 +812,11 @@ def reverse_audit_gcode(
         emitted_layer_height = 0.0
         emitted_filament_diameter = profile.filament_diameter_mm
         errors.append("G-code wrapper is missing finite volumetric-flow contract metadata.")
+    tool_flow_values: dict[str, float] = {}
+    for line in lines:
+        match = re.match(r"^; VW_TOOL_FLOW tool=(\S+) mm3_s=([-+]?\d+(?:\.\d+)?)$", line)
+        if match:
+            tool_flow_values[match.group(1)] = float(match.group(2))
     if emitted_max_flow <= 0 or emitted_calibration_flow <= 0 or emitted_filament_diameter <= 0:
         errors.append("G-code wrapper volumetric-flow contract is not positive.")
     if profile.home_before_print and "G28" not in lines:
@@ -716,7 +931,7 @@ def reverse_audit_gcode(
             else:
                 filament_area = math.pi * (emitted_filament_diameter / 2.0) ** 2
                 flow = delta_e * filament_area * fields["F"] / 60.0 / segment_length
-                hard_cap = min(emitted_max_flow, emitted_calibration_flow)
+                hard_cap = min(emitted_max_flow, tool_flow_values.get(tool or "", emitted_calibration_flow))
                 if flow > hard_cap + 1e-5:
                     errors.append(f"Segment {index} exceeds the emitted volumetric-flow cap.")
         parsed_count += 1
@@ -739,6 +954,7 @@ def reverse_audit_gcode(
         segment_count=parsed_count,
         extrusion_move_count=extrusion_moves,
         tool_changes=tuple(tool_changes),
+        tool_change_count=max(0, len(tool_changes) - 1),
         bounds_xyz=bounds,
         checked_expected_segments=min(parsed_count, len(expected_segments)) if expected_segments else 0,
     )
@@ -766,11 +982,18 @@ def export_run_package(generated: GeneratedToolpath, directory: str | Path) -> d
             "preview_is_non_authoritative": True,
         },
     )
+    tool_names = tuple(sorted({segment.tool for segment in generated.segments}))
+    tool_index = {name: index for index, name in enumerate(tool_names)}
     trace_dtype = np.dtype([("x", "<f8"), ("y", "<f8"), ("z", "<f8"), ("e", "<f8"), ("tool", "<i4")])
     trace = np.zeros(len(generated.segments), dtype=trace_dtype)
     for index, segment in enumerate(generated.segments):
-        trace[index] = (segment.end_xy_mm[0], segment.end_xy_mm[1], segment.z_mm, segment.extrusion_mm, 0)
-    trace_artifact = write_binary_array(target / "toolpath_trace.bin", trace, artifact_type="audited_toolpath_trace", metadata={"segment_count": len(trace)})
+        trace[index] = (segment.end_xy_mm[0], segment.end_xy_mm[1], segment.z_mm, segment.extrusion_mm, tool_index[segment.tool])
+    trace_artifact = write_binary_array(
+        target / "toolpath_trace.bin",
+        trace,
+        artifact_type="audited_toolpath_trace",
+        metadata={"segment_count": len(trace), "tool_id_encoding": "sorted_tool_names_zero_based", "tool_ids": tool_names},
+    )
     selection_path = target / "selection_manifest.json"
     transform_path = target / "source_to_print_transform.json"
     report_path = target / "run_report.json"
@@ -783,11 +1006,22 @@ def export_run_package(generated: GeneratedToolpath, directory: str | Path) -> d
     hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(artifact_paths, key=lambda item: item.name)}
     hashes_path = target / "hashes.json"
     _write_json(hashes_path, {"schema": "voxelweave.run-hashes.v1", "files": hashes})
+    package_path = target / "run-package.zip"
+    with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_STORED, strict_timestamps=False) as archive:
+        for path in sorted((*artifact_paths, hashes_path), key=lambda item: item.name):
+            info = zipfile.ZipInfo(path.name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, path.read_bytes())
+    package_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()
     return {
         "schema": "voxelweave.run-package.v1",
         "directory": str(target),
-        "files": sorted([path.name for path in (*artifact_paths, hashes_path)]),
-        "hashes": {**hashes, hashes_path.name: hashlib.sha256(hashes_path.read_bytes()).hexdigest()},
+        "files": sorted([path.name for path in (*artifact_paths, hashes_path, package_path)]),
+        "package_name": package_path.name,
+        "package_path": str(package_path),
+        "hashes": {**hashes, hashes_path.name: hashlib.sha256(hashes_path.read_bytes()).hexdigest(), package_path.name: package_hash},
+        "tool_id_encoding": {str(index): name for name, index in tool_index.items()},
         "audit": audit.to_dict(),
         "automatic_print_start": False,
         "physical_fidelity_claim": "not_established_by_software",

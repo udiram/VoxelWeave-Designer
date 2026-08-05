@@ -27,6 +27,8 @@ test = [
 ]
 release = [
   "pyinstaller>=6.10,<7",
+  "scipy>=1.11,<2",
+  "manifold3d>=3,<4",
 ]
 
 [tool.setuptools.packages.find]
