@@ -18,17 +18,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.17.0
       - name: Allocate bundle directory
@@ -40,7 +40,7 @@ jobs:
           VOXELWEAVE_REQUIRE_RAILWAY_WORKSPACES: "1"
         run: pnpm run railway:bundle -- --output-dir "$BUNDLE_DIR"
       - name: Upload Railway bundle for review
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: voxelweave-railway-bundle
           path: ${{ env.BUNDLE_DIR }}

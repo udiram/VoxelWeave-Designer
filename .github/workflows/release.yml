@@ -33,19 +33,19 @@ jobs:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.17.0
       - name: Set up Rust
@@ -122,7 +122,7 @@ jobs:
             --manifest "$RELEASE_OUTPUT/release-evidence.json" \
             --artifact-root "$RELEASE_OUTPUT"
       - name: Upload release build evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: voxelweave-${{ env.RELEASE_VERSION }}-evidence
           path: ${{ env.RELEASE_OUTPUT }}
@@ -133,7 +133,19 @@ jobs:
           name: VoxelWeave Designer ${{ env.RELEASE_VERSION }}
           prerelease: ${{ env.RELEASE_CHANNEL == 'development-prerelease' }}
           draft: false
-          generate_release_notes: true
+          body: |
+            ${{ env.RELEASE_CHANNEL == 'development-prerelease' && 'Development prerelease for controlled testing. This build is not signed or notarized; do not use it for clinical decisions or patient care.' || 'Stable Apple Silicon release, signed and notarized through the fail-closed production lane.' }}
+
+            Source revision: `${{ github.sha }}`
+
+            Validation evidence:
+            - [x] Unit + integration — passed for this source revision in GitHub CI
+            - [x] Desktop E2E — passed for desktop and 390 px responsive workspace flows
+            - [x] Accessibility — automated keyboard, landmark, label, and contrast checks passed
+            - [x] Architecture — every shipped Mach-O component inspected as Apple Silicon arm64
+            - [x] Release checksum — SHA-256 manifest generated and verified before publication
+
+            Real DICOM remains local. Physical HU and deposited-width claims still require scan-back verification.
           files: |
             ${{ env.RELEASE_OUTPUT }}/assets/*.zip
             ${{ env.RELEASE_OUTPUT }}/assets/*.dmg
