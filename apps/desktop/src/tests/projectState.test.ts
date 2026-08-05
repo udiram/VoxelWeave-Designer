@@ -97,6 +97,46 @@ describe("synthetic workflow state", () => {
     expect(dicomObjects[0]).toMatchObject({ sourcePath: "/study/second", name: "second" });
   });
 
+  it("centers a nonzero-origin DICOM source and rejects invalid scene transforms", () => {
+    const initial = createInitialProjectState();
+    const source = {
+      ...structuredClone(initial.source),
+      path: "/study/nonzero",
+      origin: { x: 10, y: -20, z: 30 },
+      dimensions: { x: 11, y: 21, z: 6 },
+      spacing: { x: 2, y: 1, z: 4 },
+      directionLps: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    };
+    const imported = projectReducer(initial, { type: "SET_DICOM_SOURCE", source });
+    expect(imported.scene.find((object) => object.kind === "dicom")?.transform.position).toEqual({ x: 20, y: -10, z: 40 });
+
+    const target = imported.scene.find((object) => object.kind !== "dicom")!;
+    const invalid = projectReducer(imported, { type: "SET_SCENE_TRANSFORM", id: target.id, transform: { scale: { x: 0, y: 10, z: 10 } } });
+    expect(invalid.scene.find((object) => object.id === target.id)?.transform.scale).toEqual(target.transform.scale);
+    expect(invalid.ui.toast).toMatch(/greater than zero/);
+  });
+
+  it("normalizes a legacy imported mesh around its recovered manipulation pivot", () => {
+    const initial = createInitialProjectState();
+    const legacy = {
+      ...initial,
+      scene: [...initial.scene, {
+        id: "legacy-mesh",
+        name: "Legacy mesh",
+        kind: "fixture" as const,
+        region: "fixture" as const,
+        tool: "T1" as const,
+        sourcePath: "/study/legacy.stl",
+        transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 2, y: 4, z: 6 } },
+        visible: true,
+      }],
+    };
+    const hydrated = projectReducer(legacy, { type: "HYDRATE_IMPORTED_SOLID", id: "legacy-mesh", vertices: [[10, 20, 30], [12, 24, 36]], faces: [[0, 1, 1]], dimensionsMm: { x: 2, y: 4, z: 6 }, centerMm: { x: 11, y: 22, z: 33 } });
+    const mesh = hydrated.scene.find((object) => object.id === "legacy-mesh");
+    expect(mesh?.sourceCenterMm).toEqual({ x: 11, y: 22, z: 33 });
+    expect(mesh?.vertices).toEqual([[-1, -2, -3], [1, 2, 3]]);
+  });
+
   it("clears non-hydrated run evidence when reopening a saved project", () => {
     const project = structuredClone(createInitialProjectState());
     const { ui: _ui, ...document } = project;

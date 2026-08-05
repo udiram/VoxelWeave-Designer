@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ElementRef, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Canvas } from "@react-three/fiber";
-import { Bounds, OrbitControls, Html, Line, PerspectiveCamera } from "@react-three/drei";
+import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
+import { Bounds, OrbitControls, Html, Line, PerspectiveCamera, TransformControls, useBounds } from "@react-three/drei";
 import * as THREE from "three";
-import type { CropBounds, Orientation, SceneObject, ToolId } from "../types";
+import type { CropBounds, Orientation, SceneObject, SceneTransformMode, ToolId, Vec3 } from "../types";
 import { Icon } from "./icons";
 import type { MprPlaneResult, VolumePreviewResult } from "../services/sidecarClient";
 
@@ -382,58 +382,308 @@ function meshGeometry(object: SceneObject): THREE.BufferGeometry {
   return new THREE.BoxGeometry(Math.max(0.1, dimensions.x), Math.max(0.1, dimensions.z), Math.max(0.1, dimensions.y));
 }
 
-function SceneMesh({ object, selected, onSelect }: { object: SceneObject; selected: boolean; onSelect: () => void }) {
+function roundedVector(vector: Vec3): Vec3 {
+  return { x: Number(vector.x.toFixed(4)), y: Number(vector.y.toFixed(4)), z: Number(vector.z.toFixed(4)) };
+}
+
+export function scenePositionToThree(position: Vec3): [number, number, number] {
+  return [position.x, position.z, -position.y];
+}
+
+export function threePositionToScene(position: THREE.Vector3): Vec3 {
+  return roundedVector({ x: position.x, y: -position.z, z: position.y });
+}
+
+const sceneToThreeBasis = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
+const threeToSceneBasis = sceneToThreeBasis.clone().invert();
+
+export function sceneRotationToThree(rotation: Vec3): [number, number, number] {
+  const sceneMatrix = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(
+    THREE.MathUtils.degToRad(rotation.x),
+    THREE.MathUtils.degToRad(rotation.y),
+    THREE.MathUtils.degToRad(rotation.z),
+    "XYZ",
+  ));
+  const threeMatrix = sceneToThreeBasis.clone().multiply(sceneMatrix).multiply(threeToSceneBasis);
+  const threeEuler = new THREE.Euler().setFromRotationMatrix(threeMatrix, "XYZ");
+  return [threeEuler.x, threeEuler.y, threeEuler.z];
+}
+
+export function threeRotationToScene(rotation: THREE.Euler): Vec3 {
+  const threeMatrix = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(rotation.x, rotation.y, rotation.z, "XYZ"));
+  const sceneMatrix = threeToSceneBasis.clone().multiply(threeMatrix).multiply(sceneToThreeBasis);
+  const sceneEuler = new THREE.Euler().setFromRotationMatrix(sceneMatrix, "XYZ");
+  return roundedVector({
+    x: THREE.MathUtils.radToDeg(sceneEuler.x),
+    y: THREE.MathUtils.radToDeg(sceneEuler.y),
+    z: THREE.MathUtils.radToDeg(sceneEuler.z),
+  });
+}
+
+function geometryDimensions(object: SceneObject): Vec3 {
+  return object.sourceDimensionsMm ?? object.dimensionsMm ?? object.transform.scale;
+}
+
+export function sceneScaleToThree(object: SceneObject): [number, number, number] {
+  if (object.kind === "dicom") return [1, 1, 1];
+  const base = geometryDimensions(object);
+  return [object.transform.scale.x / base.x, object.transform.scale.z / base.z, object.transform.scale.y / base.y];
+}
+
+export function threeScaleToScene(object: SceneObject, scale: THREE.Vector3): Vec3 {
+  const base = geometryDimensions(object);
+  return roundedVector({
+    x: Math.max(0.001, Math.abs(scale.x) * base.x),
+    y: Math.max(0.001, Math.abs(scale.z) * base.y),
+    z: Math.max(0.001, Math.abs(scale.y) * base.z),
+  });
+}
+
+type DirectManipulationState = {
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+  position: THREE.Vector3;
+  unitsPerPixel: number;
+  right: THREE.Vector3;
+  up: THREE.Vector3;
+  startTransform: SceneObject["transform"];
+  currentTransform: SceneObject["transform"];
+  moved: boolean;
+};
+
+function cloneTransform(transform: SceneObject["transform"]): SceneObject["transform"] {
+  return {
+    position: { ...transform.position },
+    rotation: { ...transform.rotation },
+    scale: { ...transform.scale },
+  };
+}
+
+export function directGestureTransform(start: SceneObject["transform"], mode: SceneTransformMode, deltaX: number, deltaY: number, snapEnabled: boolean): SceneObject["transform"] {
+  const next = cloneTransform(start);
+  if (mode === "rotate") {
+    const snap = (value: number) => snapEnabled ? Math.round(value / 15) * 15 : value;
+    next.rotation.x = Number(snap(start.rotation.x - deltaY * 0.45).toFixed(4));
+    next.rotation.z = Number(snap(start.rotation.z + deltaX * 0.45).toFixed(4));
+  } else if (mode === "scale") {
+    let factor = Math.max(0.05, 1 + (deltaX - deltaY) / 200);
+    if (snapEnabled) factor = Math.max(0.05, Math.round(factor / 0.05) * 0.05);
+    next.scale = roundedVector({
+      x: Math.max(0.001, start.scale.x * factor),
+      y: Math.max(0.001, start.scale.y * factor),
+      z: Math.max(0.001, start.scale.z * factor),
+    });
+  }
+  return next;
+}
+
+function transformsMatch(left: SceneObject["transform"], right: SceneObject["transform"]): boolean {
+  return (["position", "rotation", "scale"] as const).every((part) => (["x", "y", "z"] as const).every((axis) => Math.abs(left[part][axis] - right[part][axis]) < 0.0001));
+}
+
+function SceneMesh({ object, selected, mode, snapEnabled, onSelect, onSelectedMesh, onTransformCommit, onDraggingChange }: { object: SceneObject; selected: boolean; mode: SceneTransformMode; snapEnabled: boolean; onSelect: () => void; onSelectedMesh: (mesh: THREE.Mesh | null) => void; onTransformCommit: (transform: SceneObject["transform"]) => void; onDraggingChange: (dragging: boolean) => void }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const directManipulationRef = useRef<DirectManipulationState | null>(null);
+  const { camera, size, invalidate } = useThree();
+  const registerMesh = useCallback((mesh: THREE.Mesh | null) => {
+    meshRef.current = mesh;
+  }, []);
+  useEffect(() => {
+    if (!selected) return;
+    onSelectedMesh(meshRef.current);
+    return () => onSelectedMesh(null);
+  }, [onSelectedMesh, selected]);
   const geometry = useMemo(
     () => meshGeometry(object),
     [object.kind, object.dimensionsMm, object.transform.scale, object.vertices, object.faces, object.polygonSides],
   );
   useEffect(() => () => geometry.dispose(), [geometry]);
-  const dimensions = object.dimensionsMm ?? object.transform.scale;
-  const sourceDimensions = object.sourceDimensionsMm;
-  const importedScale = sourceDimensions ? [object.transform.scale.x / sourceDimensions.x, object.transform.scale.z / sourceDimensions.z, object.transform.scale.y / sourceDimensions.y] as [number, number, number] : [1, 1, 1] as [number, number, number];
-  return <mesh geometry={geometry} scale={importedScale} position={[object.transform.position.x, object.transform.position.z, -object.transform.position.y]} rotation={[THREE.MathUtils.degToRad(object.transform.rotation.x), THREE.MathUtils.degToRad(object.transform.rotation.z), THREE.MathUtils.degToRad(-object.transform.rotation.y)]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
-    <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent opacity={object.kind === "dicom" ? 0.16 : object.visible ? 0.86 : 0.12} wireframe={object.kind === "dicom"} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
-    {selected && <lineSegments><edgesGeometry args={[geometry]} /><lineBasicMaterial color={orange} /></lineSegments>}
-    {selected && <Html position={[0, dimensions.z / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>}
-  </mesh>;
+  const displayedDimensions = object.kind === "dicom" ? object.dimensionsMm ?? object.transform.scale : object.transform.scale;
+  const finishDirectManipulation = useCallback((pointerId: number, target?: Element) => {
+    const drag = directManipulationRef.current;
+    if (!drag || drag.pointerId !== pointerId) return;
+    directManipulationRef.current = null;
+    target?.releasePointerCapture?.(pointerId);
+    onDraggingChange(false);
+    if (drag.moved && !transformsMatch(drag.startTransform, drag.currentTransform)) onTransformCommit(drag.currentTransform);
+  }, [onDraggingChange, onTransformCommit]);
+  useEffect(() => {
+    const finishPointer = (event: PointerEvent) => finishDirectManipulation(event.pointerId, event.target instanceof Element ? event.target : undefined);
+    const finishBlur = () => {
+      const pointerId = directManipulationRef.current?.pointerId;
+      if (pointerId !== undefined) finishDirectManipulation(pointerId);
+    };
+    window.addEventListener("pointerup", finishPointer);
+    window.addEventListener("pointercancel", finishPointer);
+    window.addEventListener("blur", finishBlur);
+    return () => {
+      window.removeEventListener("pointerup", finishPointer);
+      window.removeEventListener("pointercancel", finishPointer);
+      window.removeEventListener("blur", finishBlur);
+    };
+  }, [finishDirectManipulation]);
+  const startDirectManipulation = (pointerId: number, clientX: number, clientY: number, target?: Element) => {
+    if (object.kind === "dicom" || !meshRef.current) return;
+    const mesh = meshRef.current;
+    const distance = Math.max(1, camera.position.distanceTo(mesh.getWorldPosition(new THREE.Vector3())));
+    const perspective = camera instanceof THREE.PerspectiveCamera ? 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance : 100 / Math.max(0.001, (camera as THREE.OrthographicCamera).zoom);
+    const startTransform = cloneTransform(object.transform);
+    directManipulationRef.current = {
+      pointerId,
+      clientX,
+      clientY,
+      position: mesh.position.clone(),
+      unitsPerPixel: perspective / Math.max(1, size.height),
+      right: new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize(),
+      up: new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize(),
+      startTransform,
+      currentTransform: cloneTransform(startTransform),
+      moved: false,
+    };
+    target?.setPointerCapture?.(pointerId);
+    onDraggingChange(true);
+  };
+  const manipulateDirectly = (pointerId: number, clientX: number, clientY: number) => {
+    const drag = directManipulationRef.current;
+    const mesh = meshRef.current;
+    if (!drag || drag.pointerId !== pointerId || !mesh) return;
+    const pixelDeltaX = clientX - drag.clientX;
+    const pixelDeltaY = clientY - drag.clientY;
+    let nextTransform = directGestureTransform(drag.startTransform, mode, pixelDeltaX, pixelDeltaY, snapEnabled);
+    if (mode === "translate") {
+      const nextPosition = drag.position.clone().addScaledVector(drag.right, pixelDeltaX * drag.unitsPerPixel).addScaledVector(drag.up, -pixelDeltaY * drag.unitsPerPixel);
+      if (snapEnabled) nextPosition.set(Math.round(nextPosition.x * 2) / 2, Math.round(nextPosition.y * 2) / 2, Math.round(nextPosition.z * 2) / 2);
+      nextTransform = { ...nextTransform, position: threePositionToScene(nextPosition) };
+      mesh.position.copy(nextPosition);
+    } else if (mode === "rotate") {
+      mesh.rotation.set(...sceneRotationToThree(nextTransform.rotation));
+    } else {
+      mesh.scale.set(...sceneScaleToThree({ ...object, transform: nextTransform }));
+    }
+    drag.currentTransform = nextTransform;
+    drag.moved = !transformsMatch(drag.startTransform, nextTransform);
+    invalidate();
+  };
+  const gestureLabel = `${mode === "translate" ? "Move" : mode === "rotate" ? "Rotate" : "Scale"} ${object.name}`;
+  return <mesh ref={registerMesh} geometry={geometry} scale={sceneScaleToThree(object)} position={scenePositionToThree(object.transform.position)} rotation={sceneRotationToThree(object.transform.rotation)} raycast={object.kind === "dicom" ? () => null : undefined} onClick={(event) => { event.stopPropagation(); onSelect(); }} onPointerDown={(event: ThreeEvent<PointerEvent>) => { if (event.button !== 0) return; event.stopPropagation(); onSelect(); startDirectManipulation(event.pointerId, event.clientX, event.clientY, event.target as Element); }} onPointerMove={(event: ThreeEvent<PointerEvent>) => { if (directManipulationRef.current) event.stopPropagation(); manipulateDirectly(event.pointerId, event.clientX, event.clientY); }} onPointerUp={(event: ThreeEvent<PointerEvent>) => { if (directManipulationRef.current) event.stopPropagation(); finishDirectManipulation(event.pointerId, event.target as Element); }} onPointerCancel={(event: ThreeEvent<PointerEvent>) => finishDirectManipulation(event.pointerId, event.target as Element)} onLostPointerCapture={(event: ThreeEvent<PointerEvent>) => finishDirectManipulation(event.pointerId, event.target as Element)}>
+      <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent depthWrite={object.kind !== "dicom"} opacity={object.kind === "dicom" ? 0.13 : object.visible ? 0.86 : 0.12} wireframe={object.kind === "dicom"} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
+      {selected && <lineSegments><edgesGeometry args={[geometry]} /><lineBasicMaterial color={orange} /></lineSegments>}
+      {selected && <Html position={[0, displayedDimensions.z / 2 + 4, 0]} center>{object.kind !== "dicom" ? <button type="button" className="scene-object-label scene-object-drag-handle" aria-label={gestureLabel} onPointerDown={(event: ReactPointerEvent<HTMLButtonElement>) => { if (event.button !== 0) return; event.stopPropagation(); startDirectManipulation(event.pointerId, event.clientX, event.clientY, event.currentTarget); }} onPointerMove={(event) => { event.stopPropagation(); manipulateDirectly(event.pointerId, event.clientX, event.clientY); }} onPointerUp={(event) => { event.stopPropagation(); finishDirectManipulation(event.pointerId, event.currentTarget); }} onPointerCancel={(event) => finishDirectManipulation(event.pointerId, event.currentTarget)} onLostPointerCapture={(event) => finishDirectManipulation(event.pointerId, event.currentTarget)}>{object.name}</button> : <span className="scene-object-label">{object.name}</span>}</Html>}
+    </mesh>;
 }
 
-function DesignScene({ selectedId, onSelect, scene }: { selectedId: string; onSelect: (id: string) => void; scene: SceneObject[] }) {
+function CameraFitController({ fitVersion, target, waitForTarget }: { fitVersion: number; target: THREE.Object3D | null; waitForTarget: boolean }) {
+  const bounds = useBounds();
+  const completedVersion = useRef(-1);
+  useEffect(() => {
+    if (completedVersion.current === fitVersion || (waitForTarget && !target)) return;
+    completedVersion.current = fitVersion;
+    const frame = window.requestAnimationFrame(() => bounds.refresh(target ?? undefined).fit().clip());
+    return () => window.cancelAnimationFrame(frame);
+  }, [bounds, fitVersion, target, waitForTarget]);
+  return null;
+}
+
+function DesignScene({ selectedId, mode, snapEnabled, gridVisible, fitVersion, fitTargetId, onSelect, onTransformCommit, onDraggingChange, scene }: { selectedId: string; mode: SceneTransformMode; snapEnabled: boolean; gridVisible: boolean; fitVersion: number; fitTargetId?: string; onSelect: (id: string) => void; onTransformCommit: (id: string, transform: SceneObject["transform"]) => void; onDraggingChange: (dragging: boolean) => void; scene: SceneObject[] }) {
+  const [orbitEnabled, setOrbitEnabled] = useState(true);
+  const [selectedMesh, setSelectedMesh] = useState<THREE.Mesh | null>(null);
+  const transformControlsRef = useRef<ElementRef<typeof TransformControls>>(null);
+  const transformStartRef = useRef<SceneObject["transform"] | null>(null);
+  const transformDraggingRef = useRef(false);
+  const selectedObject = scene.find((object) => object.id === selectedId);
+  const handleDraggingChange = useCallback((dragging: boolean) => { setOrbitEnabled(!dragging); onDraggingChange(dragging); }, [onDraggingChange]);
+  const commitTransform = useCallback(() => {
+    if (!transformDraggingRef.current && !transformStartRef.current) return;
+    transformDraggingRef.current = false;
+    handleDraggingChange(false);
+    if (!selectedMesh || !selectedObject || selectedObject.kind === "dicom") return;
+    const mappedRotation = threeRotationToScene(selectedMesh.rotation);
+    const next = {
+      position: threePositionToScene(selectedMesh.position),
+      rotation: mode === "rotate" && snapEnabled ? roundedVector({
+        x: Math.round(mappedRotation.x / 15) * 15,
+        y: Math.round(mappedRotation.y / 15) * 15,
+        z: Math.round(mappedRotation.z / 15) * 15,
+      }) : mappedRotation,
+      scale: threeScaleToScene(selectedObject, selectedMesh.scale),
+    };
+    const start = transformStartRef.current ?? selectedObject.transform;
+    transformStartRef.current = null;
+    if (!transformsMatch(start, next)) onTransformCommit(selectedObject.id, next);
+  }, [handleDraggingChange, mode, onTransformCommit, selectedMesh, selectedObject, snapEnabled]);
+  useEffect(() => {
+    const finishInterruptedTransform = () => {
+      if (!transformDraggingRef.current) return;
+      const controls = transformControlsRef.current as unknown as { pointerUp?: (pointer: { button: number }) => void } | null;
+      controls?.pointerUp?.({ button: 0 });
+      if (transformDraggingRef.current) commitTransform();
+    };
+    window.addEventListener("pointerup", finishInterruptedTransform);
+    window.addEventListener("pointercancel", finishInterruptedTransform);
+    window.addEventListener("blur", finishInterruptedTransform);
+    return () => {
+      window.removeEventListener("pointerup", finishInterruptedTransform);
+      window.removeEventListener("pointercancel", finishInterruptedTransform);
+      window.removeEventListener("blur", finishInterruptedTransform);
+    };
+  }, [commitTransform]);
   return <>
     <PerspectiveCamera makeDefault position={[120, 120, 160]} fov={42} near={0.1} far={2000} />
     <ambientLight intensity={0.58} />
     <directionalLight position={[140, 180, 120]} intensity={1.3} />
-    <gridHelper args={[400, 40, "#697477", "#273033"]} rotation={[0, 0, 0]} />
+    {gridVisible && <gridHelper args={[400, 40, "#697477", "#273033"]} rotation={[0, 0, 0]} />}
     <axesHelper args={[60]} />
-    <Bounds fit clip observe margin={1.25}><group>{scene.filter((object) => object.visible).map((object) => <SceneMesh key={object.id} object={object} selected={object.id === selectedId} onSelect={() => onSelect(object.id)} />)}</group></Bounds>
-    <OrbitControls makeDefault enablePan enableZoom enableRotate />
+    <Bounds fit clip margin={1.25}><group>{scene.filter((object) => object.visible).map((object) => <SceneMesh key={object.id} object={object} selected={object.id === selectedId} mode={mode} snapEnabled={snapEnabled} onSelect={() => onSelect(object.id)} onSelectedMesh={setSelectedMesh} onTransformCommit={(transform) => onTransformCommit(object.id, transform)} onDraggingChange={handleDraggingChange} />)}</group><CameraFitController fitVersion={fitVersion} target={fitTargetId === selectedId ? selectedMesh : null} waitForTarget={Boolean(fitTargetId)} /></Bounds>
+    {selectedMesh && selectedObject && selectedObject.kind !== "dicom" && <TransformControls
+      ref={transformControlsRef}
+      object={selectedMesh}
+      mode={mode}
+      size={1.05}
+      translationSnap={snapEnabled ? 0.5 : undefined}
+      rotationSnap={snapEnabled ? THREE.MathUtils.degToRad(15) : undefined}
+      scaleSnap={snapEnabled ? 0.05 : undefined}
+      onMouseDown={() => { transformStartRef.current = structuredClone(selectedObject.transform); transformDraggingRef.current = true; handleDraggingChange(true); }}
+      onMouseUp={commitTransform}
+    />}
+    <OrbitControls makeDefault enabled={orbitEnabled} enablePan enableZoom enableRotate />
   </>;
 }
 
-export function DesignViewport({ selectedId, onSelect, scene = [] }: { selectedId: string; onSelect: (id: string) => void; scene?: SceneObject[] }) {
-  const [workerState, setWorkerState] = useState("validating");
+export function DesignViewport({ selectedId, mode, snapEnabled, gridVisible, fitVersion, fitTargetId, onSelect, onTransformCommit, onKeyboardCommand, scene = [] }: { selectedId: string; mode: SceneTransformMode; snapEnabled: boolean; gridVisible: boolean; fitVersion: number; fitTargetId?: string; onSelect: (id: string) => void; onTransformCommit: (id: string, transform: SceneObject["transform"]) => void; onKeyboardCommand: (event: ReactKeyboardEvent<HTMLDivElement>) => void; scene?: SceneObject[] }) {
+  const [workerState, setWorkerState] = useState("checking preview");
+  const [dragging, setDragging] = useState(false);
   const workerRef = useRef<Worker | undefined>(undefined);
+  const requestIdRef = useRef(0);
   useEffect(() => {
     try {
       const worker = new Worker(new URL("../workers/manifoldWorker.ts", import.meta.url), { type: "module" });
       workerRef.current = worker;
-      worker.onmessage = (event: MessageEvent<{ ok: boolean; message?: string }>) => setWorkerState(event.data.ok ? "validated" : event.data.message ?? "validation unavailable");
-      worker.onerror = () => setWorkerState("validation unavailable");
-    } catch { setWorkerState("validation unavailable"); }
+      worker.onmessage = (event: MessageEvent<{ ok: boolean; message?: string; requestId?: number }>) => {
+        if (event.data.requestId !== requestIdRef.current) return;
+        setWorkerState(event.data.ok ? "preview mesh checked" : event.data.message ?? "preview check unavailable");
+      };
+      worker.onerror = () => setWorkerState("preview check unavailable");
+    } catch { setWorkerState("preview check unavailable"); }
     return () => { workerRef.current?.terminate(); workerRef.current = undefined; };
   }, []);
   useEffect(() => {
-    setWorkerState("validating");
+    setWorkerState("checking preview");
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     const timer = window.setTimeout(() => {
-      workerRef.current?.postMessage({ operation: "preview", scene: scene.map((object) => ({ id: object.id, kind: object.kind, dimensions: object.dimensionsMm ?? object.transform.scale, vertices: object.vertices, faces: object.faces, boolean: object.boolean })) });
+      workerRef.current?.postMessage({ operation: "preview", requestId, scene: scene.map((object) => ({ id: object.id, kind: object.kind, dimensions: geometryDimensions(object), transform: object.transform, vertices: object.vertices, faces: object.faces, boolean: object.boolean })) });
     }, 100);
     return () => window.clearTimeout(timer);
   }, [scene]);
-  return <div className="design-viewport" role="img" aria-label="Interactive parametric design scene preview" data-testid="design-scene-viewport" data-voxelweave-renderer="three-r3f">
+  const selected = scene.find((object) => object.id === selectedId);
+  const modeLabel = mode === "translate" ? "Move" : mode === "rotate" ? "Rotate" : "Scale";
+  return <div className={`design-viewport transform-mode-${mode} ${dragging ? "is-transforming" : ""}`} role="region" aria-label="Interactive parametric design scene" aria-describedby="design-viewport-instructions" tabIndex={0} onKeyDown={onKeyboardCommand} onPointerDown={(event) => event.currentTarget.focus({ preventScroll: true })} data-testid="design-scene-viewport" data-transform-mode={mode} data-grid-visible={gridVisible} data-snap-enabled={snapEnabled} data-voxelweave-renderer="three-r3f">
     {!webgl2Available() && <WebGL2Unavailable label="The parametric design scene" />}
-    {webgl2Available() && <Canvas frameloop="demand" gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setWorkerState("WebGL2 unavailable"); }}><DesignScene selectedId={selectedId} onSelect={onSelect} scene={scene} /></Canvas>}
-    <span className="viewport-badge viewport-badge-overlay">Scene · physical mm · manifold CSG worker</span>
+    {webgl2Available() && <Canvas frameloop="demand" gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setWorkerState("WebGL2 unavailable"); }}><DesignScene selectedId={selectedId} mode={mode} snapEnabled={snapEnabled} gridVisible={gridVisible} fitVersion={fitVersion} fitTargetId={fitTargetId} onSelect={onSelect} onTransformCommit={onTransformCommit} onDraggingChange={setDragging} scene={scene} /></Canvas>}
+    <span className="viewport-badge viewport-badge-overlay">{modeLabel} · {snapEnabled ? (mode === "translate" ? "0.5 mm snap" : mode === "rotate" ? "15° snap" : "5% snap") : "free"}{selected?.kind === "dicom" ? " · source geometry locked" : ""}</span>
     <span className="viewport-validation-state" aria-live="polite">{workerState}</span>
+    <span className="viewport-help" id="design-viewport-instructions">Drag the object or its label to {modeLabel.toLowerCase()} · handles offer axis control · background drag orbits · right-drag pans · scroll zooms · arrows nudge</span>
   </div>;
 }
 

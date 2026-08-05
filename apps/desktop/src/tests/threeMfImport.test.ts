@@ -20,6 +20,7 @@ describe("3MF import", () => {
     const mesh = parse3mf(archive);
     expect(mesh.vertices[0][0]).toBeCloseTo(76.2);
     expect(mesh.vertices[0].slice(1)).toEqual([0, 0]);
+    expect(mesh.centerMm).toEqual(expect.objectContaining({ x: expect.closeTo(88.9), y: expect.closeTo(12.7), z: expect.closeTo(12.7) }));
     expect(mesh.dimensionsMm.x).toBeCloseTo(25.4);
     expect(mesh.dimensionsMm.y).toBeCloseTo(25.4);
     expect(mesh.dimensionsMm.z).toBeCloseTo(25.4);

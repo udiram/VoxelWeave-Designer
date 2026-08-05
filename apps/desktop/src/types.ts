@@ -6,6 +6,7 @@ export type SelectionKind = "single" | "range" | "tiles";
 export type OutputMode = "continuous" | "tiles";
 export type ComparisonMode = "overlay" | "difference" | "profile";
 export type ToolId = "T0" | "T1";
+export type SceneTransformMode = "translate" | "rotate" | "scale";
 
 export interface Vec3 {
   x: number;
@@ -39,6 +40,8 @@ export interface SceneObject {
   faces?: number[][];
   /** Source mesh dimensions are kept separately from transform scale. */
   sourceDimensionsMm?: Vec3;
+  /** Center of the source mesh before it is normalized around the manipulation pivot. */
+  sourceCenterMm?: Vec3;
   boolean?: { operation: "union" | "subtract" | "intersect"; operands: string[] };
   sourcePath?: string;
   visible: boolean;
@@ -254,11 +257,12 @@ export type ProjectAction =
   | { type: "SET_SCENE_OWNERSHIP"; id: string; region?: SceneObject["region"]; tool?: ToolId }
   | { type: "SET_SCENE_TARGET_HU"; id: string; targetHu: number }
   | { type: "TOGGLE_SCENE_VISIBILITY"; id: string }
+  | { type: "RESTORE_SCENE_SNAPSHOT"; scene: SceneObject[]; selectedSceneId: string; message: string }
   | { type: "ADD_PRIMITIVE"; kind: SceneObject["kind"] }
   | { type: "BOOLEAN_SCENE"; operation: "union" | "subtract" | "intersect"; operandIds: string[] }
   | { type: "IMPORT_SOLID"; path: string; format: "stl" | "3mf" }
-  | { type: "SET_IMPORTED_SOLID"; path: string; format: "stl" | "3mf"; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3 }
-  | { type: "HYDRATE_IMPORTED_SOLID"; id: string; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3 }
+  | { type: "SET_IMPORTED_SOLID"; path: string; format: "stl" | "3mf"; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3; centerMm: Vec3 }
+  | { type: "HYDRATE_IMPORTED_SOLID"; id: string; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3; centerMm: Vec3 }
   | { type: "SET_TOAST"; message: string }
   | { type: "CLEAR_TOAST" };
 

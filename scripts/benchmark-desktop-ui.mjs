@@ -115,24 +115,32 @@ async function loadJson(filePath) {
   return JSON.parse(await readFile(filePath, "utf8"));
 }
 
-function percentile(values, fraction) {
+export function percentile(values, fraction) {
   const sorted = values.filter((value) => Number.isFinite(value)).slice().sort((a, b) => a - b);
   if (!sorted.length) return null;
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))];
 }
 
-function aggregate(values, budget) {
+export function aggregate(values, budget) {
   const finite = values.filter((value) => Number.isFinite(value));
+  const p50 = percentile(finite, 0.5);
+  const p95 = percentile(finite, 0.95);
+  const maximum = finite.length ? Math.max(...finite) : null;
+  const gateStatistic = budget?.gate_statistic ?? "max";
+  if (!["max", "p50", "p95"].includes(gateStatistic)) throw new Error(`unsupported gate_statistic ${gateStatistic}`);
+  const gateValue = gateStatistic === "p50" ? p50 : gateStatistic === "p95" ? p95 : maximum;
   const summary = {
     samples: values,
     count: finite.length,
-    p50: percentile(finite, 0.5),
-    p95: percentile(finite, 0.95),
-    max: finite.length ? Math.max(...finite) : null,
+    p50,
+    p95,
+    max: maximum,
     targetMs: budget?.target_ms ?? null,
     gateMs: budget?.gate_ms ?? null,
-    targetMet: budget?.target_ms === undefined ? null : finite.length > 0 && percentile(finite, 0.95) <= budget.target_ms,
-    gatePassed: budget?.gate_ms === undefined ? true : finite.length > 0 && Math.max(...finite) <= budget.gate_ms,
+    gateStatistic,
+    gateValue,
+    targetMet: budget?.target_ms === undefined ? null : finite.length > 0 && p95 <= budget.target_ms,
+    gatePassed: budget?.gate_ms === undefined ? true : finite.length > 0 && gateValue <= budget.gate_ms,
   };
   return summary;
 }
@@ -140,7 +148,7 @@ function aggregate(values, budget) {
 function allGateFailures(metrics) {
   return Object.entries(metrics)
     .filter(([, metric]) => metric.gatePassed === false)
-    .map(([name, metric]) => `${name}: max/p95 ${metric.max ?? "n/a"}/${metric.p95 ?? "n/a"} ms exceeds gate ${metric.gateMs} ms`);
+    .map(([name, metric]) => `${name}: ${metric.gateStatistic} ${metric.gateValue ?? "n/a"} ms exceeds gate ${metric.gateMs} ms (max ${metric.max ?? "n/a"}, p95 ${metric.p95 ?? "n/a"})`);
 }
 
 function sleepMs(milliseconds) {
@@ -492,7 +500,9 @@ async function main() {
   if (evidence.status !== "passed") process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(`desktop UI performance gate failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
+  main().catch((error) => {
+    console.error(`desktop UI performance gate failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
+}

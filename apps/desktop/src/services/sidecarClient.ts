@@ -180,16 +180,57 @@ function calibrationPayload(project: ProjectDocument): Array<Record<string, unkn
   }));
 }
 
+function targetDimensions(object: ProjectDocument["scene"][number]) {
+  return object.kind === "dicom" ? object.dimensionsMm ?? object.transform.scale : object.transform.scale;
+}
+
+function rotateVector(vector: { x: number; y: number; z: number }, rotation: { x: number; y: number; z: number }) {
+  const radians = { x: rotation.x * Math.PI / 180, y: rotation.y * Math.PI / 180, z: rotation.z * Math.PI / 180 };
+  const cosine = { x: Math.cos(radians.x), y: Math.cos(radians.y), z: Math.cos(radians.z) };
+  const sine = { x: Math.sin(radians.x), y: Math.sin(radians.y), z: Math.sin(radians.z) };
+  const afterX = { x: vector.x, y: vector.y * cosine.x - vector.z * sine.x, z: vector.y * sine.x + vector.z * cosine.x };
+  const afterY = { x: afterX.x * cosine.y + afterX.z * sine.y, y: afterX.y, z: -afterX.x * sine.y + afterX.z * cosine.y };
+  return { x: afterY.x * cosine.z - afterY.y * sine.z, y: afterY.x * sine.z + afterY.y * cosine.z, z: afterY.z };
+}
+
+function canonicalTransform(object: ProjectDocument["scene"][number]) {
+  if (!object.sourceCenterMm || !object.sourceDimensionsMm || !object.sourcePath || object.sourcePath.startsWith("synthetic://")) return object.transform;
+  const relativeCenter = {
+    x: object.sourceCenterMm.x * object.transform.scale.x / object.sourceDimensionsMm.x,
+    y: object.sourceCenterMm.y * object.transform.scale.y / object.sourceDimensionsMm.y,
+    z: object.sourceCenterMm.z * object.transform.scale.z / object.sourceDimensionsMm.z,
+  };
+  const rotatedCenter = rotateVector(relativeCenter, object.transform.rotation);
+  return {
+    ...object.transform,
+    position: {
+      x: Number((object.transform.position.x - rotatedCenter.x).toFixed(6)),
+      y: Number((object.transform.position.y - rotatedCenter.y).toFixed(6)),
+      z: Number((object.transform.position.z - rotatedCenter.z).toFixed(6)),
+    },
+  };
+}
+
+function transformedBounds(object: ProjectDocument["scene"][number]) {
+  const dimensions = targetDimensions(object);
+  const rotation = object.transform.rotation;
+  const corners = [-0.5, 0.5].flatMap((x) => [-0.5, 0.5].flatMap((y) => [-0.5, 0.5].map((z) => {
+    const rotated = rotateVector({ x: x * dimensions.x, y: y * dimensions.y, z: z * dimensions.z }, rotation);
+    return { x: rotated.x + object.transform.position.x, y: rotated.y + object.transform.position.y, z: rotated.z + object.transform.position.z };
+  })));
+  return {
+    x: [Math.min(...corners.map((corner) => corner.x)), Math.max(...corners.map((corner) => corner.x))],
+    y: [Math.min(...corners.map((corner) => corner.y)), Math.max(...corners.map((corner) => corner.y))],
+    z: [Math.min(...corners.map((corner) => corner.z)), Math.max(...corners.map((corner) => corner.z))],
+  };
+}
+
 function scenePayload(project: ProjectDocument): Record<string, unknown> {
   return {
     coordinate_frame: "designer_scene_mm",
     regions: project.scene.map((object) => {
       const dimensions = object.sourceDimensionsMm ?? object.dimensionsMm ?? object.transform.scale;
-      const targetDimensions = object.dimensionsMm ?? object.transform.scale;
-      const bounds = {
-        x: [object.transform.position.x - targetDimensions.x / 2, object.transform.position.x + targetDimensions.x / 2],
-        y: [object.transform.position.y - targetDimensions.y / 2, object.transform.position.y + targetDimensions.y / 2],
-      };
+      const bounds = transformedBounds(object);
       const calibration = project.calibrations.find((profile) => profile.accepted && profile.tool === object.tool);
       const calibratedTarget = calibration?.huSamples[Math.floor(calibration.huSamples.length / 2)]?.targetHu;
       const targetHu = object.targetHu ?? calibratedTarget;
@@ -200,7 +241,7 @@ function scenePayload(project: ProjectDocument): Record<string, unknown> {
         kind: object.kind,
         owner: `${object.tool}:${object.region}`,
         bounds_mm: bounds,
-        transform: object.transform,
+        transform: canonicalTransform(object),
         visible: object.visible,
         region: object.region,
         tool: object.tool,
@@ -215,7 +256,7 @@ function scenePayload(project: ProjectDocument): Record<string, unknown> {
           polygon_points: object.polygonPoints,
           polygon_sides: object.polygonSides,
         },
-        dimensions_mm: object.dimensionsMm ?? object.transform.scale,
+        dimensions_mm: dimensions,
         source_path: object.kind === "dicom" && (!object.sourcePath || object.sourcePath.startsWith("synthetic://")) ? project.source.path : object.sourcePath,
         boolean_operands: object.boolean?.operands ?? [],
         boolean_operation: object.boolean?.operation === "intersect" ? "intersection" : object.boolean?.operation,
@@ -382,17 +423,15 @@ export class NativeSidecarClient implements SidecarClient {
     const mode = project.selection.kind === "single" ? "single" : project.selection.outputMode === "tiles" || project.selection.kind === "tiles" ? "tile" : "continuous";
     const calibration = project.calibrations.find((profile) => profile.id === project.selection.calibrationId) ?? project.calibrations.find((profile) => profile.accepted);
     const structuralRegions = project.scene.filter((object) => object.visible && object.region !== "measurement").map((object) => {
-      const dimensions = object.dimensionsMm ?? object.transform.scale;
+      const bounds = transformedBounds(object);
       return {
         id: object.id,
         region: object.region,
         owner: `${object.tool}:${object.region}`,
         structural: true,
         marker_type: object.region === "support" ? "tab" : "anchor",
-        bounds_mm: {
-          x: [object.transform.position.x - dimensions.x / 2, object.transform.position.x + dimensions.x / 2],
-          y: [object.transform.position.y - dimensions.y / 2, object.transform.position.y + dimensions.y / 2],
-        },
+        bounds_mm: { x: bounds.x, y: bounds.y },
+        transform: object.transform,
       };
     });
     const structuralOwner = structuralRegions[0]?.owner ?? `${calibration?.tool ?? "T0"}:structure`;

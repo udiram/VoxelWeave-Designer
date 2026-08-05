@@ -9,6 +9,12 @@ function workspaceButton(page: Page, label: string) {
   return page.getByRole("navigation", { name: "Workspaces" }).getByRole("button", { name: label, exact: true });
 }
 
+async function switchWorkspace(page: Page, label: string) {
+  const button = workspaceButton(page, label);
+  if (await button.isVisible()) await button.click();
+  else await page.getByRole("combobox", { name: "Switch workspace" }).selectOption({ label });
+}
+
 function evidencePrefix(page: Page) {
   return page.viewportSize()?.width === 390 ? "mobile" : "desktop";
 }
@@ -34,7 +40,7 @@ async function resetProject(page: Page) {
 }
 
 async function runSyntheticWorkflow(page: Page) {
-  await workspaceButton(page, "DICOM").click();
+  await switchWorkspace(page, "DICOM");
   await expect(page.getByRole("heading", { name: "DICOM" })).toBeVisible();
   await page.getByRole("group", { name: "Print orientation" }).getByRole("button", { name: "Sagittal", exact: true }).click();
   await page.getByTestId("create-print-selection").click();
@@ -57,7 +63,7 @@ async function runSyntheticWorkflow(page: Page) {
   await expect(page.getByRole("heading", { name: "Send" })).toBeVisible();
   await page.getByTestId("export-run-package").click();
   await expect(page.getByText(/Exported lung-phantom-study_run-vw-demo-0001.zip/)).toBeVisible();
-  await workspaceButton(page, "Verify").click();
+  await switchWorkspace(page, "Verify");
 
   await expect(page.getByRole("heading", { name: "Verify" })).toBeVisible();
   await page.getByTestId("import-scan-back").click();
@@ -98,9 +104,9 @@ test.describe("VoxelWeave Designer synthetic desktop workflow", () => {
     const viewport = page.viewportSize();
     const suffix = viewport?.width === 390 ? "390x844" : "1536x1024";
     await page.screenshot({ path: join(evidenceDir, `${prefix}-design-${suffix}.png`), fullPage: false, scale: "css" });
-    await workspaceButton(page, "DICOM").click();
+    await switchWorkspace(page, "DICOM");
     await page.screenshot({ path: join(evidenceDir, `${prefix}-dicom-${suffix}.png`), fullPage: false, scale: "css" });
-    await workspaceButton(page, "Prepare").click();
+    await switchWorkspace(page, "Prepare");
     await page.screenshot({ path: join(evidenceDir, `${prefix}-prepare-empty-${suffix}.png`), fullPage: false, scale: "css" });
     await runSyntheticWorkflow(page);
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -115,14 +121,14 @@ test.describe("VoxelWeave Designer synthetic desktop workflow", () => {
       Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
     });
     await page.goto("/");
-    await workspaceButton(page, "Calibrate").click();
+    await switchWorkspace(page, "Calibrate");
     await expect(page.getByText("No calibration profiles")).toBeVisible();
     await expect(page.getByRole("button", { name: "Continue to Prepare" })).toBeDisabled();
   });
 
   test("requires explicit acceptance before a fixture calibration can be used", async ({ page }) => {
     await resetProject(page);
-    await workspaceButton(page, "Calibrate").click();
+    await switchWorkspace(page, "Calibrate");
     await expect(page.getByRole("button", { name: "Revoke acceptance" })).toBeVisible();
     await page.getByRole("button", { name: "Revoke acceptance" }).click();
     await expect(page.getByRole("button", { name: "Accept calibration" })).toBeVisible();
@@ -136,12 +142,95 @@ test.describe("VoxelWeave Designer synthetic desktop workflow", () => {
     const prefix = evidencePrefix(page);
     const viewport = page.viewportSize();
     const suffix = viewport?.width === 390 ? "390x844" : "1536x1024";
-    await expect(workspaceButton(page, "DICOM")).toBeVisible();
-    await workspaceButton(page, "DICOM").click();
+    const workspaceSwitch = page.getByRole("combobox", { name: "Switch workspace" });
+    if (page.viewportSize()?.width === 390) await expect(workspaceSwitch).toBeVisible();
+    else await expect(workspaceButton(page, "DICOM")).toBeVisible();
+    await switchWorkspace(page, "DICOM");
     await page.screenshot({ path: join(evidenceDir, `${prefix}-dicom-${suffix}.png`), fullPage: false, scale: "css" });
     await runSyntheticWorkflow(page);
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: join(evidenceDir, `${prefix}-verify-${suffix}.png`), fullPage: false, scale: "css" });
     await writeAccessibilityEvidence(page, `${prefix}-accessibility.json`);
+  });
+
+  test("manipulates a selected object with keyboard, modes, grid, and history", async ({ page }) => {
+    test.skip(page.viewportSize()?.width === 390, "the desktop scene interaction contract is covered at the full workspace viewport");
+    const runtimeErrors: string[] = [];
+    page.on("pageerror", (error) => runtimeErrors.push(error.message));
+    page.on("console", (message) => { if (message.type() === "error") runtimeErrors.push(message.text()); });
+    await resetProject(page);
+    const viewport = page.getByTestId("design-scene-viewport");
+    const positionX = page.getByRole("textbox", { name: "Position x" });
+    await expect(positionX).toHaveValue("0");
+
+    const viewportBox = await viewport.boundingBox();
+    expect(viewportBox).not.toBeNull();
+    if (viewportBox) {
+      await page.mouse.click(viewportBox.x + viewportBox.width * 0.5, viewportBox.y + viewportBox.height * 0.45);
+      await expect(page.getByRole("heading", { name: "Airway support" })).toBeVisible();
+      await page.getByTestId("scene-row-scene-reference-box").click();
+      await page.waitForTimeout(250);
+      const dragHandle = page.getByRole("button", { name: "Move Reference frame" });
+      await expect(dragHandle).toBeVisible();
+      await dragHandle.click();
+      await expect(page.getByRole("button", { name: "Undo scene edit" })).toBeDisabled();
+      const dragHandleBox = await dragHandle.boundingBox();
+      expect(dragHandleBox).not.toBeNull();
+      const handleX = dragHandleBox!.x + dragHandleBox!.width / 2;
+      const handleY = dragHandleBox!.y + dragHandleBox!.height / 2;
+      await page.mouse.move(handleX, handleY);
+      await page.mouse.down();
+      await page.mouse.move(handleX + 48, handleY + 24, { steps: 8 });
+      await page.mouse.up();
+      const positionY = page.getByRole("textbox", { name: "Position y" });
+      const positionZ = page.getByRole("textbox", { name: "Position z" });
+      await expect.poll(async () => [await positionX.inputValue(), await positionY.inputValue(), await positionZ.inputValue()].join("|")).not.toBe("0|0|-26");
+      await page.getByRole("button", { name: "Undo scene edit" }).click();
+      await expect(positionX).toHaveValue("0");
+      await expect(positionY).toHaveValue("0");
+      await expect(positionZ).toHaveValue("-26");
+    }
+
+    await viewport.focus();
+    await viewport.press("ArrowRight");
+    await expect(positionX).toHaveValue("0.5");
+    await page.getByRole("button", { name: "Undo scene edit" }).click();
+    await expect(positionX).toHaveValue("0");
+    await page.getByRole("button", { name: "Redo scene edit" }).click();
+    await expect(positionX).toHaveValue("0.5");
+
+    await page.getByRole("button", { name: "Rotate selection" }).click();
+    await expect(viewport).toHaveAttribute("data-transform-mode", "rotate");
+    const rotateHandle = page.getByRole("button", { name: "Rotate Reference frame" });
+    const rotateHandleBox = await rotateHandle.boundingBox();
+    expect(rotateHandleBox).not.toBeNull();
+    await page.mouse.move(rotateHandleBox!.x + rotateHandleBox!.width / 2, rotateHandleBox!.y + rotateHandleBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(rotateHandleBox!.x + rotateHandleBox!.width / 2 + 48, rotateHandleBox!.y + rotateHandleBox!.height / 2 - 24, { steps: 8 });
+    await page.mouse.up();
+    const rotationX = page.getByRole("textbox", { name: "Rotation x" });
+    const rotationZ = page.getByRole("textbox", { name: "Rotation z" });
+    await expect.poll(async () => `${await rotationX.inputValue()}|${await rotationZ.inputValue()}`).not.toBe("0|0");
+    await page.getByRole("button", { name: "Scale selection" }).click();
+    await expect(viewport).toHaveAttribute("data-transform-mode", "scale");
+    const sizeX = page.getByRole("textbox", { name: "Size x" });
+    const sizeBeforeGesture = await sizeX.inputValue();
+    const scaleHandle = page.getByRole("button", { name: "Scale Reference frame" });
+    const scaleHandleBox = await scaleHandle.boundingBox();
+    expect(scaleHandleBox).not.toBeNull();
+    await page.mouse.move(scaleHandleBox!.x + scaleHandleBox!.width / 2, scaleHandleBox!.y + scaleHandleBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(scaleHandleBox!.x + scaleHandleBox!.width / 2 + 48, scaleHandleBox!.y + scaleHandleBox!.height / 2 - 24, { steps: 8 });
+    await page.mouse.up();
+    await expect(sizeX).not.toHaveValue(sizeBeforeGesture);
+    await page.getByRole("button", { name: "Toggle grid" }).click();
+    await expect(viewport).toHaveAttribute("data-grid-visible", "false");
+
+    await sizeX.fill("210.5");
+    await sizeX.press("Enter");
+    await expect(sizeX).toHaveValue("210.5");
+    await page.getByRole("button", { name: "Focus selection in view" }).click();
+    await page.screenshot({ path: join(evidenceDir, "desktop-design-manipulation-1536x1024.png"), fullPage: false, scale: "css" });
+    expect(runtimeErrors).toEqual([]);
   });
 });
