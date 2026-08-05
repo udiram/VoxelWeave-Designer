@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readTextFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 import { useProject } from "../../state/ProjectContext";
 import { authorizeNativePath, isNativeRuntime } from "../../services/projectDocument";
 import { validateCalibrationProfile } from "../../state/projectState";
@@ -31,8 +31,9 @@ function emptyCalibration(tool: ToolId, id = `cal-${tool.toLowerCase()}-${Date.n
 export function CalibrateWorkspace() {
   const { state, dispatch, sidecar } = useProject();
   const [tool, setTool] = useState<ToolId>("T0");
+  const [selectedProfileId, setSelectedProfileId] = useState<string>();
   const [evidenceOpen, setEvidenceOpen] = useState(true);
-  const profile = useMemo(() => state.calibrations.find((candidate) => candidate.tool === tool) ?? state.calibrations[0], [state.calibrations, tool]);
+  const profile = useMemo(() => state.calibrations.find((candidate) => candidate.id === selectedProfileId) ?? state.calibrations.find((candidate) => candidate.tool === tool) ?? state.calibrations[0], [selectedProfileId, state.calibrations, tool]);
   const validationErrors = profile ? validateCalibrationProfile(profile) : [];
   const hasAcceptedProfile = state.calibrations.some((candidate) => candidate.accepted);
   const acceptanceNotice = profile ? (validationErrors.length > 0
@@ -43,6 +44,7 @@ export function CalibrateWorkspace() {
   const createProfile = () => {
     const next = emptyCalibration(tool);
     dispatch({ type: "UPSERT_CALIBRATION_PROFILE", profile: next });
+    setSelectedProfileId(next.id);
     setTool(next.tool);
   };
 
@@ -65,7 +67,7 @@ export function CalibrateWorkspace() {
       const selected = await open({ directory: false, multiple: false, title: "Import calibration profile", filters: [{ name: "Calibration JSON", extensions: ["json", "calibration"] }] });
       if (typeof selected !== "string") return;
       await authorizeNativePath(selected);
-      const raw = JSON.parse(await readTextFile(selected)) as Partial<CalibrationProfile>;
+      const raw = JSON.parse(await invoke<string>("read_authorized_text_file", { path: selected })) as Partial<CalibrationProfile>;
       const imported: CalibrationProfile = {
         ...emptyCalibration(raw.tool === "T1" ? "T1" : "T0", typeof raw.id === "string" && raw.id ? raw.id : undefined),
         ...raw,
@@ -73,6 +75,7 @@ export function CalibrateWorkspace() {
         huSamples: Array.isArray(raw.huSamples) ? raw.huSamples : [],
       };
       dispatch({ type: "UPSERT_CALIBRATION_PROFILE", profile: imported });
+      setSelectedProfileId(imported.id);
       setTool(imported.tool);
     } catch (error) {
       dispatch({ type: "SET_TOAST", message: error instanceof Error ? `Calibration import failed: ${error.message}` : "Calibration import failed" });
@@ -82,14 +85,14 @@ export function CalibrateWorkspace() {
   return <div className="workspace-layout calibrate-layout">
     <aside className="left-rail calibrate-rail" aria-label="Calibration profiles rail">
       <RailHeader title="Profiles" action="plus" actionLabel="Create calibration profile" onAction={createProfile} />
-      <div className="profile-list">{state.calibrations.length ? state.calibrations.map((candidate) => <button type="button" key={candidate.id} className={`profile-row ${candidate.id === profile?.id ? "selected" : ""}`} onClick={() => { setTool(candidate.tool); }}><span className={`tool-swatch ${candidate.tool.toLowerCase()}`} /><span className="profile-copy"><strong>{candidate.name || "Unnamed calibration"}</strong><small>{candidate.printer || "Printer not bound"}</small><small>{candidate.scanner || "Scanner not bound"}</small></span><StatusBadge tone={candidate.accepted ? "ready" : "warning"} icon={candidate.accepted ? "checkCircle" : "warning"}>{candidate.accepted ? "Accepted" : "Review"}</StatusBadge></button>) : <Notice tone="info" title="No calibration profiles"><span>Create a profile or import a local calibration JSON. Generation stays blocked until explicit acceptance.</span><Button variant="secondary" icon="plus" onClick={createProfile} data-testid="create-calibration-profile">Create profile</Button></Notice>}</div>
+      <div className="profile-list">{state.calibrations.length ? state.calibrations.map((candidate) => <button type="button" key={candidate.id} className={`profile-row ${candidate.id === profile?.id ? "selected" : ""}`} onClick={() => { setSelectedProfileId(candidate.id); setTool(candidate.tool); }}><span className={`tool-swatch ${candidate.tool.toLowerCase()}`} /><span className="profile-copy"><strong>{candidate.name || "Unnamed calibration"}</strong><small>{candidate.printer || "Printer not bound"}</small><small>{candidate.scanner || "Scanner not bound"}</small></span><StatusBadge tone={candidate.accepted ? "ready" : "warning"} icon={candidate.accepted ? "checkCircle" : "warning"}>{candidate.accepted ? "Accepted" : "Review"}</StatusBadge></button>) : <Notice tone="info" title="No calibration profiles"><span>Create a profile or import a local calibration JSON. Generation stays blocked until explicit acceptance.</span><Button variant="secondary" icon="plus" onClick={createProfile} data-testid="create-calibration-profile">Create profile</Button></Notice>}</div>
       <div className="rail-divider" />
       <div className="binding-summary"><div><Icon name="link" size={15} /><span>Bound fields</span></div><p>Tool · material · lot · printer · scanner · reconstruction</p><StatusBadge tone={profile && validationErrors.length === 0 ? "ready" : "warning"} icon={profile && validationErrors.length === 0 ? "check" : "warning"}>{profile && validationErrors.length === 0 ? "validated" : "needs review"}</StatusBadge></div>
       <div className="rail-bottom"><Button variant="secondary" icon="upload" onClick={() => void importProfile()} data-testid="import-calibration-profile">Import calibration JSON</Button><Button variant="quiet" icon="file" onClick={() => dispatch({ type: "SET_TOAST", message: "Calibration evidence manifest is available in the local run package" })}>Open evidence manifest</Button></div>
     </aside>
     <section className="workspace-center calibrate-center" aria-labelledby="calibrate-heading">
       <div className="center-toolbar"><div><span className="workspace-kicker">RAIL WIDTH → HU EVIDENCE</span><h1 id="calibrate-heading">Calibrate</h1></div><div className="tool-group"><Button variant="quiet" icon="refresh" onClick={() => dispatch({ type: "SET_TOAST", message: sidecar.mode === "native" ? "Calibration samples are read from the local evidence manifest" : "Calibration samples refreshed from the controlled test adapter" })}>Refresh samples</Button><IconButton label="Calibration help" icon="help" onClick={() => dispatch({ type: "SET_TOAST", message: "Commanded rail width is the independent variable; pitch and layer height stay locked" })} /></div></div>
-      <div className="calibrate-toolbar"><SegmentedControl label="Tool profile" value={tool} options={[{ value: "T0", label: "T0" }, { value: "T1", label: "T1" }]} onChange={(value) => setTool(value as ToolId)} /><span className="mpr-toolbar-note"><Icon name="database" size={15} />Source: {sidecar.mode === "native" ? "local signed-HU calibration evidence" : "controlled browser calibration fixture"}</span></div>
+      <div className="calibrate-toolbar"><SegmentedControl label="Tool profile" value={tool} options={[{ value: "T0", label: "T0" }, { value: "T1", label: "T1" }]} onChange={(value) => { setTool(value as ToolId); setSelectedProfileId(undefined); }} /><span className="mpr-toolbar-note"><Icon name="database" size={15} />Source: {sidecar.mode === "native" ? "local signed-HU calibration evidence" : "controlled browser calibration fixture"}</span></div>
       {profile ? <>
         <div className="calibration-summary"><div><span>Profile</span><strong>{profile.name || "Unnamed calibration"}</strong></div><div><span>Width boundary</span><strong>{profile.widthRange[0].toFixed(2)}–{profile.widthRange[1].toFixed(2)} mm</strong></div><div><span>Layer height</span><strong>{profile.layerHeightMm > 0 ? `${profile.layerHeightMm.toFixed(2)} mm` : "Not set"}</strong></div><div><span>Evidence state</span><StatusBadge tone={profile.accepted ? "ready" : "warning"} icon={profile.accepted ? "check" : "warning"}>{profile.accepted ? "accepted" : "review required"}</StatusBadge></div></div>
         <div className="calibration-main"><div className="plot-panel"><div className="plot-heading"><div><h2>Rail field fit</h2><p>Measured HU samples · interpolation stays inside the accepted width range.</p></div><StatusBadge tone={validationErrors.length ? "warning" : "ready"} icon={validationErrors.length ? "warning" : "check"}>{validationErrors.length ? "needs review" : "fit stable"}</StatusBadge></div><CalibrationPlot tool={tool} samples={profile.huSamples} /><div className="plot-legend"><span><i className="legend-line teal" />Measured samples</span><span><i className="legend-line sienna" />Requested width</span><span><i className="legend-range" />Accepted boundary</span></div></div><div className="sample-table" aria-label="Calibration HU samples"><div className="table-caption"><span>HU samples</span><span>{profile.huSamples.length} rows · edit before acceptance</span><Button variant="quiet" icon="plus" onClick={() => updateProfile({ huSamples: [...profile.huSamples, { widthMm: profile.widthRange[0] || 0.4, measuredHu: 0, targetHu: 0 }] })} data-testid="add-calibration-sample">Add sample</Button></div><table><thead><tr><th>Width</th><th>Measured HU</th><th>Target HU</th><th>Δ HU</th></tr></thead><tbody>{profile.huSamples.map((sample, index) => <tr key={`${profile.id}-${index}`}><td><input aria-label={`Sample ${index + 1} width`} type="number" step="0.01" value={sample.widthMm} onChange={(event) => updateSample(index, { widthMm: Number(event.target.value) })} /></td><td><input aria-label={`Sample ${index + 1} measured HU`} type="number" step="1" value={sample.measuredHu} onChange={(event) => updateSample(index, { measuredHu: Number(event.target.value) })} /></td><td><input aria-label={`Sample ${index + 1} target HU`} type="number" step="1" value={sample.targetHu} onChange={(event) => updateSample(index, { targetHu: Number(event.target.value) })} /></td><td className={Math.abs(sample.measuredHu - sample.targetHu) > 25 ? "warning-text" : ""}>{sample.measuredHu - sample.targetHu > 0 ? "+" : ""}{sample.measuredHu - sample.targetHu}</td></tr>)}</tbody></table><div className="table-foot"><Icon name="info" size={14} /><span>{sidecar.mode === "native" ? "Calibration evidence remains local and must be bound to the selected printer and scanner." : "Target values are controlled browser adapter fixtures, not clinical thresholds."}</span></div></div></div>

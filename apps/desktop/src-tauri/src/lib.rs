@@ -480,6 +480,18 @@ fn open_voxelweave_document(state: State<'_, SidecarManager>, path: String) -> R
     Ok(document)
 }
 
+#[tauri::command]
+fn read_authorized_text_file(state: State<'_, SidecarManager>, path: String) -> Result<String, String> {
+    let target = authorized_path(&state, &path, false)?;
+    let metadata = std::fs::metadata(&target)
+        .map_err(|error| format!("cannot inspect {}: {error}", target.display()))?;
+    if metadata.len() as usize > MAX_DOCUMENT_BYTES {
+        return Err("calibration profile exceeds the bounded document size".to_string());
+    }
+    std::fs::read_to_string(&target)
+        .map_err(|error| format!("cannot read {}: {error}", target.display()))
+}
+
 fn shutdown_sidecar_process(state: &SidecarManager) -> Result<(), String> {
     let mut process = state
         .process
@@ -518,7 +530,8 @@ pub fn run() {
             sidecar_shutdown,
             authorize_path,
             save_voxelweave_document,
-            open_voxelweave_document
+            open_voxelweave_document,
+            read_authorized_text_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building VoxelWeave Designer");
