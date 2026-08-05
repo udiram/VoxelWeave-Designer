@@ -1,6 +1,6 @@
 [build]
-builder = "RAILPACK"
-buildCommand = "corepack enable && corepack prepare pnpm@11.17.0 --activate && pnpm install --frozen-lockfile && pnpm --dir apps/site build && pnpm --dir services/release-api build"
+builder = "DOCKERFILE"
+dockerfilePath = "services/release-api/Dockerfile"
 
 [deploy]
 startCommand = "node services/release-api/dist/server.js"
