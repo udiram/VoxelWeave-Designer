@@ -20,6 +20,8 @@ export default defineConfig({
   },
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1536, height: 1024 } } },
-    { name: "mobile", use: { ...devices["iPhone 13"], viewport: { width: 390, height: 844 } } },
+    // Chromium keeps responsive coverage stable on GitHub's arm64 macOS runners.
+    // The native WKWebView path is exercised separately by the Tauri build and smoke checks.
+    { name: "mobile", use: { ...devices["Pixel 7"], viewport: { width: 390, height: 844 } } },
   ],
 });
