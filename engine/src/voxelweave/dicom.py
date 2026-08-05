@@ -278,8 +278,10 @@ def _frame_records(
             raise DicomValidationError("DICOM pixel data could not be decoded for a supported CT source.") from exc
     else:
         # Metadata-first inspection must never force a full-resolution decode.
-        pixels = np.empty((frames, rows, columns), dtype=np.float32)
-    if frames == 1:
+        pixels = np.empty((0, 0, 0), dtype=np.float32)
+    if not decode_pixels:
+        pixel_frames = pixels
+    elif frames == 1:
         pixel_frames = pixels[np.newaxis, ...] if pixels.ndim == 2 else pixels
     elif pixels.ndim >= 3 and pixels.shape[0] == frames:
         pixel_frames = pixels
@@ -463,7 +465,8 @@ def _collect(
             continue
         records, pixels, ds = candidate
         for index, record in enumerate(records):
-            groups[record.series_uid].append((record, pixels[index], ds))
+            pixel = pixels[index] if pixels.ndim >= 3 and index < pixels.shape[0] else np.empty((0, 0), dtype=np.float32)
+            groups[record.series_uid].append((record, pixel, ds))
             if not record.eligible:
                 excluded += 1
     return groups, excluded
