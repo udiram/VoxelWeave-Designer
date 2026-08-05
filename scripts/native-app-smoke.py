@@ -87,7 +87,28 @@ def _read_response(process: subprocess.Popen[bytes], request_id: str, timeout_se
         "protocol": PROTOCOL,
         "request_id": request_id,
         "operation": "validate_scene",
-        "payload": {"scene": {"regions": [{"id": "native-smoke", "owner": "T0:measurement"}]}},
+        "payload": {
+            "scene": {
+                "coordinate_frame": "designer_scene_mm",
+                "regions": [
+                    {
+                        "id": "native-smoke",
+                        "kind": "box",
+                        "owner": "T0:measurement",
+                        "region": "measurement",
+                        "tool": "T0",
+                        "target_hu": 0,
+                        "visible": True,
+                        "transform": {
+                            "position": {"x": 0, "y": 0, "z": 0.5},
+                            "rotation": {"x": 0, "y": 0, "z": 0},
+                            "scale": {"x": 1, "y": 1, "z": 1},
+                        },
+                        "geometry": {"kind": "box", "dimensions": {"x": 1, "y": 1, "z": 1}},
+                    }
+                ],
+            }
+        },
     }
     process.stdin.write((json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
     process.stdin.flush()
