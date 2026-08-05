@@ -208,6 +208,7 @@ def inspect_payload(path: Path, *, max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTE
     outer_description = _run([file_bin, "-Lb", str(path)])
     if "Mach-O" not in outer_description:
         raise PayloadInspectionError(f"PyInstaller payload is not a Mach-O executable: {outer_description}")
+    outer_architectures = _run([lipo_bin, "-archs", str(path)])
 
     mapped, file_handle, entries = _archive_entries(path, max_entry_bytes)
     # Derive archive_start again from the cookie so extraction remains tied to
@@ -219,6 +220,8 @@ def inspect_payload(path: Path, *, max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTE
 
     inspected: list[dict[str, Any]] = []
     failures: list[str] = []
+    if outer_architectures != "arm64":
+        failures.append(f"outer executable: architectures={outer_architectures or 'unreadable'} (expected exactly arm64)")
     macho_count = 0
     try:
         with tempfile.TemporaryDirectory(prefix="voxelweave-pyi-inspect-") as extraction_root:
@@ -254,6 +257,7 @@ def inspect_payload(path: Path, *, max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTE
         "schemaVersion": "voxelweave.native-payload-architecture.v1",
         "payload": path.name,
         "outerDescription": outer_description,
+        "outerArchitectures": outer_architectures,
         "entryCount": len(entries),
         "machOCount": macho_count,
         "nativeEntries": inspected,
@@ -299,7 +303,7 @@ def main() -> int:
     _write_report(args.report, report)
     if report.get("status") == "passed":
         print(
-            f"[native-payload] PASS {args.sidecar} :: entries={report['entryCount']} Mach-O={report['machOCount']} target=arm64"
+            f"[native-payload] PASS {args.sidecar} :: outer={report['outerArchitectures']} entries={report['entryCount']} Mach-O={report['machOCount']} target=arm64"
         )
         for entry in report.get("nativeEntries", []):
             print(f"PASS {entry['name']} :: architectures={entry['architectures']}")
