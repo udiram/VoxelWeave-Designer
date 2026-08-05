@@ -9,7 +9,7 @@ interface Props {
 }
 
 const { title, description, active = 'home' } = Astro.props;
-const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udiram/VoxelWeave';
+const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udiram/VoxelWeave-Designer';
 const pageTitle = title.includes('VoxelWeave') ? title : `${title} · VoxelWeave Designer`;
 ---
 

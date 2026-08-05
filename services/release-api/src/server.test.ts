@@ -24,7 +24,7 @@ const release: GitHubRelease = {
     name: 'VoxelWeave-Designer-arm64.dmg',
     size: 100,
     digest: `sha256:${'b'.repeat(64)}`,
-    browser_download_url: 'https://github.com/udiram/VoxelWeave/releases/download/v0.1.0/VoxelWeave-Designer-arm64.dmg'
+    browser_download_url: 'https://github.com/udiram/VoxelWeave-Designer/releases/download/v0.1.0/VoxelWeave-Designer-arm64.dmg'
   }]
 };
 

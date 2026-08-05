@@ -13,7 +13,7 @@ const parsePositiveInteger = (value: string | undefined, fallback: number): numb
 };
 
 const normalizeRepo = (value: string | undefined): string => {
-  const repo = value?.trim() || 'udiram/VoxelWeave';
+  const repo = value?.trim() || 'udiram/VoxelWeave-Designer';
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new Error('GITHUB_REPOSITORY must be in owner/name form');
   return repo;
 };
