@@ -268,7 +268,14 @@ def _owner_tool(value: object) -> str | None:
 def _region_bounds(region: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
     candidate = region.get("bounds_mm") or region.get("bounds")
     if isinstance(candidate, Mapping):
-        values = (candidate.get("x_min"), candidate.get("y_min"), candidate.get("x_max"), candidate.get("y_max"))
+        if isinstance(candidate.get("x"), (list, tuple)) and isinstance(candidate.get("y"), (list, tuple)):
+            x_range = cast(Sequence[Any], candidate["x"])
+            y_range = cast(Sequence[Any], candidate["y"])
+            if len(x_range) != 2 or len(y_range) != 2:
+                raise GeometryValidationError("Region bounds x and y ranges must contain two coordinates each.")
+            values = (x_range[0], y_range[0], x_range[1], y_range[1])
+        else:
+            values = (candidate.get("x_min"), candidate.get("y_min"), candidate.get("x_max"), candidate.get("y_max"))
     elif isinstance(candidate, (list, tuple)) and len(candidate) == 4:
         values = tuple(candidate)
     elif isinstance(region.get("x_range_mm"), (list, tuple)) and isinstance(region.get("y_range_mm"), (list, tuple)):
