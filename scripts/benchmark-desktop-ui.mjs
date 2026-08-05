@@ -249,7 +249,7 @@ async function measureDicom(page) {
     const count = await panes.count();
     for (let index = 0; index < count; index += 1) await dragInside(page, panes.nth(index), { moves: 12 });
     await dragInside(page, page.locator(".interactive-volume"), { moves: 10, wheel: 180 });
-    await page.getByRole("button", { name: "Synchronize crosshair" }).click();
+    await page.getByRole("button", { name: "Linked crosshair", exact: true }).click();
   });
 }
 

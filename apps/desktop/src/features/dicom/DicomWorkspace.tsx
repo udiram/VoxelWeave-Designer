@@ -26,7 +26,8 @@ export function DicomWorkspace() {
   const [windowLevel, setWindowLevel] = useState({ width: 1600, center: -600 });
   const [windowingLinked, setWindowingLinked] = useState(true);
   const selection = state.selection;
-  const maxIndex = Math.max(0, state.source.sliceCount - 1);
+  const planeMaxIndex = (plane: Orientation) => Math.max(0, (plane === "axial" ? state.source.dimensions.z : plane === "sagittal" ? state.source.dimensions.x : state.source.dimensions.y) - 1);
+  const maxIndex = planeMaxIndex(selection.orientation);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,7 +76,17 @@ export function DicomWorkspace() {
       if (!paths.length) return;
       await Promise.all(paths.map((path) => authorizeNativePath(path)));
       const sourcePath = paths[0];
-      const candidate = { ...state.source, path: sourcePath, inputPaths: paths, name: sourcePath.split(/[\\/]/).pop() ?? "DICOM source", seriesUid: "", status: "needs-review" as const };
+      const candidate = {
+        ...state.source,
+        path: sourcePath,
+        inputPaths: paths,
+        sourceHash: undefined,
+        directionLps: undefined,
+        name: sourcePath.split(/[\\/]/).pop() ?? "DICOM source",
+        seriesUid: "",
+        status: "needs-review" as const,
+        cache: { scientificSource: "full-resolution signed-HU cache" as const, preview: "256³ refined" as const, identity: "pending" },
+      };
       const inspected = await sidecar.inspectDicomSource({ ...state, source: candidate }, progress(dispatch));
       const inspectedSource = { ...inspected.source, inputPaths: paths };
       dispatch({ type: "SET_DICOM_SOURCE", source: inspectedSource });
@@ -118,8 +129,10 @@ export function DicomWorkspace() {
   };
   const positionForIndex = (index: number) => {
     const spacing = selection.orientation === "axial" ? state.source.spacing.z : selection.orientation === "sagittal" ? state.source.spacing.x : state.source.spacing.y;
-    const origin = selection.orientation === "axial" ? state.source.origin.z : selection.orientation === "sagittal" ? state.source.origin.x : state.source.origin.y;
-    return origin + index * spacing;
+    const column = selection.orientation === "axial" ? 2 : selection.orientation === "sagittal" ? 0 : 1;
+    const direction = state.source.directionLps && state.source.directionLps.length === 3 ? state.source.directionLps : [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const originProjection = state.source.origin.x * direction[0][column] + state.source.origin.y * direction[1][column] + state.source.origin.z * direction[2][column];
+    return originProjection + index * spacing;
   };
 
   return <div className="workspace-layout dicom-layout">
@@ -134,7 +147,7 @@ export function DicomWorkspace() {
       <div className="center-toolbar"><div><span className="workspace-kicker">SERIES / MPR / PHYSICAL COORDINATES</span><h1 id="dicom-heading">DICOM</h1></div><div className="tool-group"><Button variant={crosshairLinked ? "quiet" : "secondary"} icon="crosshair" onClick={() => { setCrosshairLinked((value) => !value); dispatch({ type: "SET_TOAST", message: crosshairLinked ? "Crosshair linking disabled; panes are independent" : "Crosshair synchronized across all four views" }); }}>{crosshairLinked ? "Linked crosshair" : "Independent crosshair"}</Button><Button variant={windowingLinked ? "quiet" : "secondary"} icon="sliders" onClick={() => setWindowingLinked((value) => !value)}>{windowingLinked ? "Linked W/L" : "Independent W/L"}</Button><IconButton label="Reset MPR layout" icon="fit" onClick={() => dispatch({ type: "SET_TOAST", message: "MPR layout reset to synchronized 2 × 2" })} /></div></div>
       <div className="mpr-toolbar"><SegmentedControl label="Active plane" value={state.ui.selectedPane === "3d" ? "axial" : state.ui.selectedPane} options={planes.map((plane) => ({ value: plane, label: plane[0].toUpperCase() + plane.slice(1) }))} onChange={(value) => setOrientation(value as Orientation)} /><span className="mpr-toolbar-note" aria-live="polite"><Icon name="link" size={15} />{crosshairLinked ? "Linked physical coordinates" : "Independent physical coordinates"} · {windowingLinked ? "linked" : "independent"} window {Math.round(windowLevel.width)} / level {Math.round(windowLevel.center)} · {state.source.cache.preview}</span></div>
       {pendingSeries.length > 0 && <div className="series-chooser" role="dialog" aria-label="Choose DICOM series"><strong>Choose a CT series</strong><span>Multiple eligible SeriesInstanceUID values were found; no series was auto-selected.</span><select aria-label="DICOM series" defaultValue="" onChange={(event) => { const candidate = pendingSeries.find((series) => series.seriesUid === event.target.value); if (candidate) void finishImport({ ...state.source, seriesUid: candidate.seriesUid, name: candidate.name, status: "needs-review", inputPaths: state.source.inputPaths }, candidate.seriesUid); }}><option value="" disabled>Select a series…</option>{pendingSeries.map((series) => <option key={series.seriesUid} value={series.seriesUid}>{series.name || series.modality} · {series.sliceCount} slices · {series.seriesUid}</option>)}</select></div>}
-      <div className="mpr-grid">{planes.map((plane) => <InteractiveMprPane key={plane} testAdapter={sidecar.mode !== "native"} plane={plane} result={mpr[plane]} index={selection.orientation === plane ? selection.start : Math.floor(maxIndex / 2)} selected={state.ui.selectedPane === plane} crosshair={crosshairLinked ? linkedCrosshair : undefined} windowWidth={windowLevel.width} windowCenter={windowLevel.center} onSelect={() => dispatch({ type: "SET_SELECTED_PANE", pane: plane })} onSliceChange={(delta) => { const next = Math.max(0, Math.min(maxIndex, selection.start + delta)); dispatch({ type: "SET_SELECTION", patch: { start: next, end: Math.max(selection.end, next) } }); }} onCrosshair={(x, y) => { if (crosshairLinked) setLinkedCrosshair({ x, y }); dispatch({ type: "SET_TOAST", message: `${plane} crosshair · ${Math.round(x * 100)}% / ${Math.round(y * 100)}% physical coordinates` }); }} onWindowLevel={(width, center) => { if (windowingLinked) setWindowLevel({ width, center }); }} />)}<InteractiveVolumePreview result={volumePreview} crop={selection.crop} bounds={physicalBounds} onCropChange={(crop) => dispatch({ type: "SET_SELECTION", patch: { crop } })} /></div>
+      <div className="mpr-grid">{planes.map((plane) => <InteractiveMprPane key={plane} testAdapter={sidecar.mode !== "native"} plane={plane} result={mpr[plane]} index={selection.orientation === plane ? selection.start : Math.floor(planeMaxIndex(plane) / 2)} selected={state.ui.selectedPane === plane} crosshair={crosshairLinked ? linkedCrosshair : undefined} windowWidth={windowLevel.width} windowCenter={windowLevel.center} onSelect={() => setOrientation(plane)} onSliceChange={(delta) => { const current = selection.orientation === plane ? selection.start : Math.floor(planeMaxIndex(plane) / 2); const next = Math.max(0, Math.min(planeMaxIndex(plane), current + delta)); dispatch({ type: "SET_SELECTION", patch: { orientation: plane, start: next, end: Math.max(next, selection.orientation === plane ? selection.end : next) } }); dispatch({ type: "SET_SELECTED_PANE", pane: plane }); }} onCrosshair={(x, y) => { if (crosshairLinked) setLinkedCrosshair({ x, y }); const horizontalAxis = plane === "sagittal" ? "y" : "x"; const verticalAxis = plane === "axial" ? "y" : "z"; const horizontal = physicalBounds[horizontalAxis][0] + x * (physicalBounds[horizontalAxis][1] - physicalBounds[horizontalAxis][0]); const vertical = physicalBounds[verticalAxis][0] + y * (physicalBounds[verticalAxis][1] - physicalBounds[verticalAxis][0]); dispatch({ type: "SET_TOAST", message: `${plane} crosshair · LPS ${horizontalAxis.toUpperCase()} ${horizontal.toFixed(1)}, ${verticalAxis.toUpperCase()} ${vertical.toFixed(1)} mm` }); }} onWindowLevel={(width, center) => { if (windowingLinked) setWindowLevel({ width, center }); }} />)}<InteractiveVolumePreview result={volumePreview} windowWidth={windowLevel.width} windowCenter={windowLevel.center} crop={selection.crop} bounds={physicalBounds} onCropChange={(crop) => dispatch({ type: "SET_SELECTION", patch: { crop } })} /></div>
     </section>
     <aside className="right-inspector dicom-inspector" aria-label="Print selection inspector">
       <div className="inspector-title"><div><span className="workspace-kicker">PHYSICAL OUTPUT</span><h2>Print selection</h2></div><IconButton label="Selection options" icon="more" size={17} onClick={() => dispatch({ type: "SET_TOAST", message: "Selection options use patient-coordinate bounds" })} /></div>

@@ -4,7 +4,7 @@
     "navigation": true,
     "footer": true
   },
-  "namedInteractiveControls": 25,
+  "namedInteractiveControls": 27,
   "focusVisibleRule": true,
   "overflow": {
     "width": 390,

@@ -3,6 +3,11 @@ import type { CalibrationProfile, CropBounds, DicomSource, ProjectAction, Projec
 
 const requiredCalibrationFields: Array<keyof Pick<CalibrationProfile, "name" | "material" | "lot" | "printer" | "scanner" | "reconstruction">> = ["name", "material", "lot", "printer", "scanner", "reconstruction"];
 
+function sourcePlaneMaxIndex(source: DicomSource, orientation: ProjectState["selection"]["orientation"]): number {
+  const dimension = orientation === "axial" ? source.dimensions.z : orientation === "sagittal" ? source.dimensions.x : source.dimensions.y;
+  return Math.max(0, dimension - 1);
+}
+
 export function validateCalibrationProfile(profile: CalibrationProfile): string[] {
   const errors: string[] = [];
   requiredCalibrationFields.forEach((field) => {
@@ -92,13 +97,14 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const selection = { ...state.selection, ...action.patch };
       const spacing = selection.orientation === "axial" ? state.source.spacing.z : selection.orientation === "sagittal" ? state.source.spacing.x : state.source.spacing.y;
       const span = selection.kind === "single" ? 1 : Math.max(1, selection.end - selection.start);
-      const boundedStart = Math.max(0, Math.min(selection.start, state.source.sliceCount - 1));
-      const boundedEnd = Math.max(boundedStart, Math.min(selection.end, state.source.sliceCount - 1));
+      const maxIndex = sourcePlaneMaxIndex(state.source, selection.orientation);
+      const boundedStart = Math.max(0, Math.min(selection.start, maxIndex));
+      const boundedEnd = Math.max(boundedStart, Math.min(selection.end, maxIndex));
       return { ...state, selection: { ...selection, start: boundedStart, end: boundedEnd, stride: Math.max(1, selection.stride), thicknessMm: Number((span * spacing).toFixed(3)), outputDimensionsMm: { x: Math.abs(selection.crop.x[1] - selection.crop.x[0]) * selection.scale, y: Math.abs(selection.crop.y[1] - selection.crop.y[0]) * selection.scale, z: Number((span * spacing * selection.scale).toFixed(3)) } } };
     }
     case "SET_DICOM_SOURCE": {
       const source = action.source;
-      const max = Math.max(1, source.sliceCount - 1);
+      const max = sourcePlaneMaxIndex(source, state.selection.orientation);
       const end = Math.min(state.selection.end, max);
       const start = Math.min(state.selection.start, end);
       const spacing = state.selection.orientation === "axial" ? source.spacing.z : state.selection.orientation === "sagittal" ? source.spacing.x : source.spacing.y;

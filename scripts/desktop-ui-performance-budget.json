@@ -15,7 +15,7 @@
     "design_geometry_interaction_p95_frame_ms": {
       "target_ms": 16.7,
       "gate_ms": 120,
-      "description": "95th-percentile requestAnimationFrame interval during SVG geometry and transform interactions"
+      "description": "95th-percentile requestAnimationFrame interval during React Three Fiber geometry and transform interactions"
     },
     "toolpath_interaction_p95_frame_ms": {
       "target_ms": 16.7,

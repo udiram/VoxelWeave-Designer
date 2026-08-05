@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Html, Line, PerspectiveCamera } from "@react-three/drei";
+import { Bounds, OrbitControls, Html, Line, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import type { CropBounds, Orientation, SceneObject, ToolId } from "../types";
 import { Icon } from "./icons";
@@ -53,10 +53,31 @@ async function readBinaryArtifact(path: string): Promise<{ values: Float32Array;
   const bytes = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
   if (bytes.length < 10 || String.fromCharCode(...bytes.slice(0, 6)) !== "VWBF\x01\x00") throw new Error("Unsupported VoxelWeave binary artifact");
   const headerLength = new DataView(bytes.buffer, bytes.byteOffset + 6, 4).getUint32(0, false);
-  const header = JSON.parse(new TextDecoder().decode(bytes.slice(10, 10 + headerLength))) as { shape: number[]; dtype: string };
+  if (headerLength < 1 || 10 + headerLength > bytes.length) throw new Error("VoxelWeave binary header is truncated");
+  const header = JSON.parse(new TextDecoder().decode(bytes.slice(10, 10 + headerLength))) as { shape: number[]; dtype: string; payload_bytes?: number };
   const payload = bytes.slice(10 + headerLength);
-  if (!header.shape?.length || !header.dtype?.includes("f4")) throw new Error("Artifact is not a float HU plane");
-  return { values: new Float32Array(payload.buffer, payload.byteOffset, Math.floor(payload.byteLength / 4)), shape: header.shape };
+  if (!header.shape?.length || !header.shape.every((value) => Number.isInteger(value) && value >= 0)) throw new Error("VoxelWeave binary shape is invalid");
+  if (header.payload_bytes !== undefined && header.payload_bytes !== payload.byteLength) throw new Error("VoxelWeave binary payload length does not match its header");
+  if (header.dtype.startsWith(">")) throw new Error("Big-endian VoxelWeave artifacts are unsupported");
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const descriptor = header.dtype.replace(/^[<>=|]/, "");
+  const readers: Record<string, { bytes: number; read: (offset: number) => number }> = {
+    f4: { bytes: 4, read: (offset) => view.getFloat32(offset, true) },
+    f8: { bytes: 8, read: (offset) => view.getFloat64(offset, true) },
+    i1: { bytes: 1, read: (offset) => view.getInt8(offset) },
+    u1: { bytes: 1, read: (offset) => view.getUint8(offset) },
+    i2: { bytes: 2, read: (offset) => view.getInt16(offset, true) },
+    u2: { bytes: 2, read: (offset) => view.getUint16(offset, true) },
+    i4: { bytes: 4, read: (offset) => view.getInt32(offset, true) },
+    u4: { bytes: 4, read: (offset) => view.getUint32(offset, true) },
+  };
+  const reader = readers[descriptor];
+  if (!reader || payload.byteLength % reader.bytes !== 0) throw new Error(`Unsupported VoxelWeave scalar dtype ${header.dtype}`);
+  const itemCount = header.shape.reduce((product, value) => product * value, 1);
+  if (itemCount * reader.bytes !== payload.byteLength) throw new Error("VoxelWeave binary payload does not fit its declared shape");
+  const values = new Float32Array(itemCount);
+  for (let index = 0; index < itemCount; index += 1) values[index] = reader.read(index * reader.bytes);
+  return { values, shape: header.shape };
 }
 
 export function InteractiveMprPane({ plane, result, selected = false, index, windowWidth = 1600, windowCenter = -600, crosshair: linkedCrosshair, onSelect, onCrosshair, onWindowLevel, onSliceChange, testAdapter = false }: { plane: Orientation; result?: MprPlaneResult; selected?: boolean; index: number; windowWidth?: number; windowCenter?: number; crosshair?: { x: number; y: number }; onSelect?: () => void; onCrosshair?: (x: number, y: number) => void; onWindowLevel?: (width: number, center: number) => void; onSliceChange?: (delta: number) => void; testAdapter?: boolean }) {
@@ -150,21 +171,21 @@ export function InteractiveMprPane({ plane, result, selected = false, index, win
   };
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const active = drag.current;
-    if (!active) return;
     const point = eventPoint(event);
-      if (active.mode === "crosshair") { setCrosshair(point); onCrosshair?.(point.x, point.y); }
     const [height, width] = shapeRef.current;
     const sx = Math.max(0, Math.min(width - 1, Math.floor(point.x * width)));
     const sy = Math.max(0, Math.min(height - 1, Math.floor(point.y * height)));
     const value = valuesRef.current?.[sy * width + sx] ?? (testAdapter ? -1000 + (((sx * 13 + sy * 7 + index * 17) % 1200)) : -1024);
     setSampleHu(value);
+    if (!active) return;
+    if (active.mode === "crosshair") { setCrosshair(point); onCrosshair?.(point.x, point.y); }
     if (active.mode === "window") { const width = Math.max(1, active.width + (event.clientX - active.x) * 4); const center = active.center - (event.clientY - active.y) * 4; setWindowing({ width, center }); onWindowLevel?.(width, center); }
     if (active.mode === "pan") setView((value) => ({ ...value, panX: active.panX + event.clientX - active.x, panY: active.panY + event.clientY - active.y }));
   };
   const handlePointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => { drag.current = undefined; event.currentTarget.releasePointerCapture(event.pointerId); };
   const reset = () => { setView({ zoom: 1, panX: 0, panY: 0 }); setWindowing({ width: windowWidth, center: windowCenter }); setCrosshair({ x: 0.5, y: 0.5 }); setSampleHu(-1024); onCrosshair?.(0.5, 0.5); };
   return <button type="button" className={`ct-pane interactive-mpr ${selected ? "selected" : ""}`} onClick={onSelect} aria-label={testAdapter ? `${plane} synthetic CT slice` : `${plane} DICOM MPR pane`}>
-    <canvas ref={canvasRef} role="img" aria-label={`${plane} MPR from ${result?.source ?? "sidecar"}`} onWheel={(event) => { event.preventDefault(); onSliceChange?.(event.deltaY > 0 ? 1 : -1); }} onDoubleClick={reset} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} />
+    <canvas ref={canvasRef} role="img" aria-label={`${plane} MPR from ${result?.source ?? "sidecar"}`} onWheel={(event) => { event.preventDefault(); if (event.ctrlKey || event.metaKey) setView((value) => ({ ...value, zoom: Math.max(0.5, Math.min(8, value.zoom * (event.deltaY > 0 ? 0.9 : 1.1))) })); else onSliceChange?.(event.deltaY > 0 ? 1 : -1); }} onDoubleClick={reset} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} />
     <span className="mpr-orientation-labels" aria-hidden="true">L/R · A/P · S/I</span>
     <span className="mpr-readout" aria-live="polite">HU {Math.round(sampleHu)} · voxel {Math.round(crosshair.x * (result?.shapeYx?.[1] ?? 0))},{Math.round(crosshair.y * (result?.shapeYx?.[0] ?? 0))} · physical {result?.coordinateMm?.toFixed(2) ?? "—"} mm · zoom {view.zoom.toFixed(2)}×</span>
     {error && <span className="mpr-artifact-error">{error}</span>}
@@ -252,6 +273,21 @@ function VolumeShaderMesh({ texture, mode, threshold }: { texture: THREE.Data3DT
   return <mesh><boxGeometry args={[2, 2, 2]} /><primitive object={material} attach="material" /></mesh>;
 }
 
+function normalizeVolumeValues(values: Float32Array, windowWidth?: number, windowCenter?: number): Float32Array {
+  let minimum = Infinity;
+  let maximum = -Infinity;
+  values.forEach((value) => {
+    if (Number.isFinite(value)) {
+      minimum = Math.min(minimum, value);
+      maximum = Math.max(maximum, value);
+    }
+  });
+  if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || (minimum >= 0 && maximum <= 1)) return values;
+  const lower = Number.isFinite(windowWidth) && Number.isFinite(windowCenter) ? Number(windowCenter) - Number(windowWidth) / 2 : minimum;
+  const range = Number.isFinite(windowWidth) && Number(windowWidth) > 0 ? Number(windowWidth) : Math.max(1e-6, maximum - minimum);
+  return Float32Array.from(values, (value) => Number.isFinite(value) ? Math.max(0, Math.min(1, (value - lower) / range)) : 0);
+}
+
 function VolumeCropHandles({ crop, bounds, onCropChange }: { crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
   const [active, setActive] = useState<{ axis: keyof CropBounds; side: 0 | 1 }>();
   if (!crop || !bounds || !onCropChange) return null;
@@ -274,10 +310,10 @@ function VolumeCropHandles({ crop, bounds, onCropChange }: { crop?: CropBounds; 
   }}><sphereGeometry args={[0.07, 12, 8]} /><meshBasicMaterial color={orange} /></mesh>))}</group>;
 }
 
-function VolumeScene({ result, values, shape, mode, threshold, crop, bounds, onCropChange }: { result?: VolumePreviewResult; values: Float32Array; shape: [number, number, number]; mode: "dvr" | "mip" | "iso"; threshold: number; crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
+function VolumeScene({ result, values, shape, mode, threshold, windowWidth, windowCenter, crop, bounds, onCropChange }: { result?: VolumePreviewResult; values: Float32Array; shape: [number, number, number]; mode: "dvr" | "mip" | "iso"; threshold: number; windowWidth?: number; windowCenter?: number; crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
   const texture = useMemo(() => {
     const [depth, height, width] = shape;
-    const data = new THREE.Data3DTexture(values, width, height, depth);
+    const data = new THREE.Data3DTexture(normalizeVolumeValues(values, windowWidth, windowCenter), width, height, depth);
     data.format = THREE.RedFormat;
     data.type = THREE.FloatType;
     data.minFilter = THREE.LinearFilter;
@@ -285,7 +321,7 @@ function VolumeScene({ result, values, shape, mode, threshold, crop, bounds, onC
     data.unpackAlignment = 1;
     data.needsUpdate = true;
     return data;
-  }, [shape, values]);
+  }, [shape, values, windowCenter, windowWidth]);
   return <>
     <PerspectiveCamera makeDefault position={[3.4, 2.5, 3.4]} fov={42} near={0.1} far={100} />
     <ambientLight intensity={0.2} />
@@ -300,7 +336,7 @@ function VolumeScene({ result, values, shape, mode, threshold, crop, bounds, onC
   </>;
 }
 
-export function InteractiveVolumePreview({ result, onReset, crop, bounds, onCropChange }: { result?: VolumePreviewResult; onReset?: () => void; crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
+export function InteractiveVolumePreview({ result, onReset, windowWidth, windowCenter, crop, bounds, onCropChange }: { result?: VolumePreviewResult; onReset?: () => void; windowWidth?: number; windowCenter?: number; crop?: CropBounds; bounds?: CropBounds; onCropChange?: (crop: CropBounds) => void }) {
   const [payload, setPayload] = useState<{ values: Float32Array; shape: [number, number, number] }>();
   const [error, setError] = useState<string>();
   const [mode, setMode] = useState<"dvr" | "mip" | "iso">("dvr");
@@ -318,7 +354,7 @@ export function InteractiveVolumePreview({ result, onReset, crop, bounds, onCrop
   return <div className="volume-preview interactive-volume" role="img" aria-label="Interactive WebGL2 DICOM volume preview" data-voxelweave-renderer="three-r3f">
     {!webgl2Available() && <WebGL2Unavailable label="The DICOM volume" />}
     {webgl2Available() && !payload && <div className="volume-artifact-state"><Icon name="database" size={18} /><span>{error ?? "Waiting for the binary preview payload from the local sidecar…"}</span></div>}
-    {webgl2Available() && payload && <Canvas key={cameraVersion} gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setError("The active renderer did not expose WebGL2"); }}><VolumeScene result={result} values={payload.values} shape={payload.shape} mode={mode} threshold={threshold} crop={crop} bounds={bounds} onCropChange={onCropChange} /></Canvas>}
+    {webgl2Available() && payload && <Canvas key={cameraVersion} gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setError("The active renderer did not expose WebGL2"); }}><VolumeScene result={result} values={payload.values} shape={payload.shape} mode={mode} threshold={threshold} windowWidth={windowWidth} windowCenter={windowCenter} crop={crop} bounds={bounds} onCropChange={onCropChange} /></Canvas>}
     <div className="volume-controls" role="group" aria-label="Volume rendering mode"><select aria-label="Volume mode" value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="dvr">DVR</option><option value="mip">MIP</option><option value="iso">Isosurface</option></select>{mode === "iso" && <input aria-label="Isosurface threshold" type="range" min="0" max="1" step="0.01" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />}<button type="button" className="volume-reset" aria-label="Reset volume view" onClick={reset}><Icon name="fit" size={14} /></button></div>
   </div>;
 }
@@ -326,7 +362,7 @@ export function InteractiveVolumePreview({ result, onReset, crop, bounds, onCrop
 function meshGeometry(object: SceneObject): THREE.BufferGeometry {
   if (object.vertices?.length && object.faces?.length) {
     const geometry = new THREE.BufferGeometry();
-    const vertices = new Float32Array(object.vertices.flatMap((vertex) => [vertex[0] ?? 0, vertex[1] ?? 0, vertex[2] ?? 0]));
+    const vertices = new Float32Array(object.vertices.flatMap((vertex) => [vertex[0] ?? 0, vertex[2] ?? 0, -(vertex[1] ?? 0)]));
     const indices = new Uint32Array(object.faces.flatMap((face) => [face[0] ?? 0, face[1] ?? 0, face[2] ?? 0]));
     geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
@@ -336,17 +372,17 @@ function meshGeometry(object: SceneObject): THREE.BufferGeometry {
   const dimensions = object.dimensionsMm ?? object.transform.scale;
   if (object.kind === "cylinder") return new THREE.CylinderGeometry(Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.z), 48);
   if (object.kind === "polygon-prism") return new THREE.CylinderGeometry(Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.x / 2), Math.max(0.1, dimensions.z), Math.max(3, object.polygonSides ?? 6));
-  return new THREE.BoxGeometry(Math.max(0.1, dimensions.x), Math.max(0.1, dimensions.y), Math.max(0.1, dimensions.z));
+  return new THREE.BoxGeometry(Math.max(0.1, dimensions.x), Math.max(0.1, dimensions.z), Math.max(0.1, dimensions.y));
 }
 
 function SceneMesh({ object, selected, onSelect }: { object: SceneObject; selected: boolean; onSelect: () => void }) {
   const geometry = useMemo(() => meshGeometry(object), [object]);
   useEffect(() => () => geometry.dispose(), [geometry]);
   const dimensions = object.dimensionsMm ?? object.transform.scale;
-  return <mesh geometry={geometry} position={[object.transform.position.x, object.transform.position.y, object.transform.position.z]} rotation={[object.transform.rotation.x, object.transform.rotation.y, object.transform.rotation.z]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
-    <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent opacity={object.visible ? 0.86 : 0.12} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
+  return <mesh geometry={geometry} position={[object.transform.position.x, object.transform.position.z, -object.transform.position.y]} rotation={[object.transform.rotation.x, object.transform.rotation.z, -object.transform.rotation.y]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
+    <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent opacity={object.kind === "dicom" ? 0.16 : object.visible ? 0.86 : 0.12} wireframe={object.kind === "dicom"} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
     {selected && <lineSegments><edgesGeometry args={[geometry]} /><lineBasicMaterial color={orange} /></lineSegments>}
-    <Html position={[0, dimensions.y / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>
+    <Html position={[0, dimensions.z / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>
   </mesh>;
 }
 
@@ -357,7 +393,7 @@ function DesignScene({ selectedId, onSelect, scene }: { selectedId: string; onSe
     <directionalLight position={[140, 180, 120]} intensity={1.3} />
     <gridHelper args={[400, 40, "#697477", "#273033"]} rotation={[0, 0, 0]} />
     <axesHelper args={[60]} />
-    {scene.filter((object) => object.visible).map((object) => <SceneMesh key={object.id} object={object} selected={object.id === selectedId} onSelect={() => onSelect(object.id)} />)}
+    <Bounds fit clip observe margin={1.25}><group>{scene.filter((object) => object.visible).map((object) => <SceneMesh key={object.id} object={object} selected={object.id === selectedId} onSelect={() => onSelect(object.id)} />)}</group></Bounds>
     <OrbitControls makeDefault enablePan enableZoom enableRotate />
     <Html position={[-140, 120, 0]}><span className="viewport-badge">Scene · physical mm · manifold CSG worker</span></Html>
   </>;
@@ -402,10 +438,12 @@ function ToolpathInstances({ selectedLayer, activeTool, generated }: { selectedL
     instances.forEach((segment, index) => {
       const [sx, sy, sz] = segment.start;
       const [ex, ey, ez] = segment.end;
-      const dx = ex - sx; const dy = ey - sy; const dz = ez - sz;
-      const length = Math.max(0.1, Math.hypot(dx, dy, dz));
-      helper.position.set((sx + ex) / 2, (sy + ey) / 2, (sz + ez) / 2);
-      helper.rotation.set(0, -Math.atan2(dz, Math.hypot(dx, dy)), Math.atan2(dy, dx));
+      const start = new THREE.Vector3(sx, sz, -sy);
+      const end = new THREE.Vector3(ex, ez, -ey);
+      const direction = end.clone().sub(start);
+      const length = Math.max(0.1, direction.length());
+      helper.position.copy(start).add(end).multiplyScalar(0.5);
+      helper.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), direction.normalize());
       helper.scale.set(length, 0.36, 0.36);
       helper.updateMatrix();
       mesh.setMatrixAt(index, helper.matrix);
@@ -421,7 +459,7 @@ function ToolpathInstances({ selectedLayer, activeTool, generated }: { selectedL
 export function ToolpathCanvas({ selectedLayer, activeTool = "T0", generated = true, totalLayers }: { selectedLayer: number; activeTool?: ToolId; generated?: boolean; totalLayers?: number }) {
   return <div className="toolpath-canvas" role="img" aria-label={`Generated segment preview for layer ${selectedLayer}`} data-voxelweave-renderer="three-r3f">
     {!webgl2Available() && <WebGL2Unavailable label="The toolpath renderer" />}
-    {webgl2Available() && <Canvas gl={{ antialias: true, powerPreference: "high-performance" }}><PerspectiveCamera makeDefault position={[0, -150, 210]} fov={46} near={0.1} far={1000} /><ambientLight intensity={0.45} /><directionalLight position={[100, 120, 180]} intensity={1.1} /><gridHelper args={[220, 22, "#697477", "#293033"]} /><mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, -1]}><planeGeometry args={[190, 150]} /><meshStandardMaterial color="#15191a" /></mesh><ToolpathInstances selectedLayer={selectedLayer} activeTool={activeTool} generated={generated} /><OrbitControls makeDefault enablePan enableZoom enableRotate /><Html position={[-100, 76, 0]}><span className="viewport-badge">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected · instanced paths</span></Html></Canvas>}
+    {webgl2Available() && <Canvas gl={{ antialias: true, powerPreference: "high-performance" }}><PerspectiveCamera makeDefault position={[0, 150, 210]} fov={46} near={0.1} far={1000} /><ambientLight intensity={0.45} /><directionalLight position={[100, 120, 180]} intensity={1.1} /><gridHelper args={[220, 22, "#697477", "#293033"]} /><mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.2, 0]}><planeGeometry args={[190, 150]} /><meshStandardMaterial color="#15191a" /></mesh><ToolpathInstances selectedLayer={selectedLayer} activeTool={activeTool} generated={generated} /><OrbitControls makeDefault enablePan enableZoom enableRotate /><Html position={[-100, 76, 0]}><span className="viewport-badge">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected · instanced paths</span></Html></Canvas>}
   </div>;
 }
 

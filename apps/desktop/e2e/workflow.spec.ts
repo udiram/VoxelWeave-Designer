@@ -23,6 +23,14 @@ async function resetProject(page: Page) {
   } else {
     await page.getByTestId("open-synthetic-project-mobile").click();
   }
+  await expect(page.getByRole("heading", { name: "Design" })).toBeVisible();
+  const renderer = page.locator('[data-testid="design-scene-viewport"][data-voxelweave-renderer="three-r3f"] canvas');
+  await expect(renderer).toBeVisible();
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="design-scene-viewport"][data-voxelweave-renderer="three-r3f"] canvas');
+    return Boolean(canvas && canvas.width > 0 && canvas.height > 0 && canvas.getContext("webgl2"));
+  });
+  await page.waitForTimeout(300);
 }
 
 async function runSyntheticWorkflow(page: Page) {

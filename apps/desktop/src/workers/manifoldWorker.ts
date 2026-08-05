@@ -1,4 +1,5 @@
 import ManifoldModule from "manifold-3d";
+import manifoldWasmUrl from "manifold-3d/manifold.wasm?url";
 
 type WorkerObject = {
   id: string;
@@ -13,7 +14,7 @@ type PreviewRequest = { operation: "preview"; scene: WorkerObject[] };
 let runtimePromise: ReturnType<typeof ManifoldModule> | undefined;
 
 async function runtime() {
-  runtimePromise ??= ManifoldModule();
+  runtimePromise ??= ManifoldModule({ locateFile: () => manifoldWasmUrl });
   const module = await runtimePromise;
   module.setup();
   return module;

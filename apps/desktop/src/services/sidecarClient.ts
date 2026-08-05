@@ -129,11 +129,22 @@ function sourcePayload(project: ProjectDocument): Record<string, unknown> {
   return { source: inputs[0], sources: inputs, series_uid: project.source.seriesUid || undefined };
 }
 
+function sourceIdentity(project: ProjectDocument): string {
+  const inputs = project.source.inputPaths?.length ? project.source.inputPaths : [requireSource(project)];
+  return JSON.stringify(inputs);
+}
+
 function nativeCacheDirectory(project: ProjectDocument): string {
   const source = requireSource(project).replace(/[\\/]+$/, "");
   const configured = project.source.cache.directory;
   if (configured && (/^\//.test(configured) || /^[A-Za-z]:[\\/]/.test(configured))) return configured.replace(/[\\/]+$/, "");
-  return `${source}/.voxelweave-cache`;
+  const isFileInput = (project.source.inputPaths?.length ?? 0) > 1 || /\.(?:zip|dcm|dicom)$/i.test(source);
+  const sourceDirectory = isFileInput ? source.replace(/[\\/][^\\/]+$/, "") : source;
+  if (!sourceDirectory || sourceDirectory === source) {
+    if (isFileInput) throw new Error("The selected DICOM file has no writable parent directory.");
+    return `${source}/.voxelweave-cache`;
+  }
+  return `${sourceDirectory}/.voxelweave-cache`;
 }
 
 function nativeArtifactPath(path: unknown, directory: string): string | undefined {
@@ -169,25 +180,33 @@ function calibrationPayload(project: ProjectDocument): Array<Record<string, unkn
 
 function scenePayload(project: ProjectDocument): Record<string, unknown> {
   return {
-    regions: project.scene.map((object) => ({
-      id: object.id,
-      kind: object.kind,
-      owner: `${object.tool}:${object.region}`,
-      transform: object.transform,
-      visible: object.visible,
-      geometry: {
+    regions: project.scene.map((object) => {
+      const dimensions = object.dimensionsMm ?? object.transform.scale;
+      const bounds = {
+        x: [object.transform.position.x - dimensions.x / 2, object.transform.position.x + dimensions.x / 2],
+        y: [object.transform.position.y - dimensions.y / 2, object.transform.position.y + dimensions.y / 2],
+      };
+      return {
+        id: object.id,
         kind: object.kind,
-        dimensions: object.dimensionsMm ?? object.transform.scale,
-        vertices: object.vertices,
-        faces: object.faces,
+        owner: `${object.tool}:${object.region}`,
+        bounds_mm: bounds,
+        transform: object.transform,
+        visible: object.visible,
+        geometry: {
+          kind: object.kind === "polygon-prism" ? "polygon_prism" : object.kind,
+          dimensions,
+          vertices: object.vertices,
+          faces: object.faces,
+          boolean_operands: object.boolean?.operands ?? [],
+          boolean_operation: object.boolean?.operation,
+        },
+        dimensions_mm: object.dimensionsMm,
+        source_path: object.kind === "dicom" && (!object.sourcePath || object.sourcePath.startsWith("synthetic://")) ? project.source.path : object.sourcePath,
         boolean_operands: object.boolean?.operands ?? [],
         boolean_operation: object.boolean?.operation,
-      },
-      dimensions_mm: object.dimensionsMm,
-      source_path: object.kind === "dicom" && (!object.sourcePath || object.sourcePath.startsWith("synthetic://")) ? project.source.path : object.sourcePath,
-      boolean_operands: object.boolean?.operands ?? [],
-      boolean_operation: object.boolean?.operation,
-    })),
+      };
+    }),
   };
 }
 
@@ -258,26 +277,24 @@ export class NativeSidecarClient implements SidecarClient {
   }
 
   private async ensureSelected(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<void> {
-    const source = requireSource(project);
-    if (this.inspectedPath !== source) {
+    const identity = sourceIdentity(project);
+    if (this.inspectedPath !== identity) {
       await this.inspectDicomSource(project, onProgress);
     }
-    if (this.selectedPath !== source) {
+    if (this.selectedPath !== identity) {
       await this.selectDicomSeries(project, project.source.seriesUid || undefined, onProgress);
     }
   }
 
   async inspectDicomSource(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomInspectionResult> {
-    const source = requireSource(project);
     const inspection = await this.request<Record<string, unknown>>("inspect_dicom_source", sourcePayload(project), onProgress);
-    this.inspectedPath = source;
+    this.inspectedPath = sourceIdentity(project);
     return sourceFromInspection(project, inspection);
   }
 
   async selectDicomSeries(project: ProjectDocument, seriesUid?: string, onProgress?: (event: ProgressEvent) => void): Promise<DicomInspectionResult> {
-    const source = requireSource(project);
     const selected = await this.request<Record<string, unknown>>("select_dicom_series", { ...sourcePayload(project), series_uid: (seriesUid ?? project.source.seriesUid) || undefined }, onProgress);
-    this.selectedPath = source;
+    this.selectedPath = sourceIdentity(project);
     return sourceFromInspection(project, { source_label: project.source.name, series: [selected] });
   }
 
@@ -351,6 +368,21 @@ export class NativeSidecarClient implements SidecarClient {
     await this.ensureSelected(project, onProgress);
     const mode = project.selection.kind === "single" ? "single" : project.selection.outputMode === "tiles" || project.selection.kind === "tiles" ? "tile" : "continuous";
     const calibration = project.calibrations.find((profile) => profile.id === project.selection.calibrationId) ?? project.calibrations.find((profile) => profile.accepted);
+    const structuralRegions = project.scene.filter((object) => object.visible && object.region !== "measurement").map((object) => {
+      const dimensions = object.dimensionsMm ?? object.transform.scale;
+      return {
+        id: object.id,
+        region: object.region,
+        owner: `${object.tool}:${object.region}`,
+        structural: true,
+        marker_type: object.region === "support" ? "tab" : "anchor",
+        bounds_mm: {
+          x: [object.transform.position.x - dimensions.x / 2, object.transform.position.x + dimensions.x / 2],
+          y: [object.transform.position.y - dimensions.y / 2, object.transform.position.y + dimensions.y / 2],
+        },
+      };
+    });
+    const structuralOwner = structuralRegions[0]?.owner;
     const result = await this.request<Record<string, unknown>>("create_print_selection", {
       plane: project.selection.orientation,
       mode,
@@ -365,6 +397,7 @@ export class NativeSidecarClient implements SidecarClient {
       stride: project.selection.stride,
       resampling: project.selection.resamplingMethod ?? "trilinear",
       labels: project.selection.tileLabels ?? [],
+      structural_regions: structuralRegions,
       plate_layout: mode === "tile" ? {
         columns: project.selection.tilePlateColumns,
         rows: project.selection.tilePlateRows,
@@ -374,6 +407,7 @@ export class NativeSidecarClient implements SidecarClient {
         tabs: project.selection.tileTabs ?? false,
         tab_width_mm: project.selection.tileTabWidthMm,
         brim_mm: project.selection.tileBrimMm,
+        structural_owner: structuralOwner,
       } : {},
     }, onProgress);
     const printSize = Array.isArray(result.print_size_mm) ? result.print_size_mm.map(Number) : [];
@@ -399,7 +433,7 @@ export class NativeSidecarClient implements SidecarClient {
       calibration: calibrationPayload(project),
       selection: project.selection,
       scene: scenePayload(project),
-      tool: calibration.tool,
+      tool: acceptedProfiles.length === 1 ? acceptedProfiles[0].tool : undefined,
       tool_bindings: toolBindings,
       region_owners: regionOwners,
       allow_calibration_clipping: project.toolpath.clippingAcknowledged,

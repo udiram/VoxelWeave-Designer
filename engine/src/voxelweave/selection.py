@@ -317,13 +317,14 @@ def create_print_selection(
         if marker_type is not None and str(marker_type).lower() in {"label", "orientation", "orientation_marker", "notch", "tab", "anchor"}:
             normalized["marker_type"] = str(marker_type).lower()
         provided_structural.append(normalized)
+    structural_owner = str(plate.get("structural_owner", "")).strip() or "structure"
     generated_structural = [
         {
             "id": f"tile-label-{index + 1:03d}",
             "label": labels[index] if labels and index < len(labels) else f"tile-{index + 1:03d}",
             "tile_index": index,
             "region": "structural_outside_measurement_roi",
-            "owner": "structure",
+            "owner": structural_owner,
             "marker_type": "label",
             "structural": True,
         }

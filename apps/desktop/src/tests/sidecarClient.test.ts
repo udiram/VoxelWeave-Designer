@@ -51,7 +51,7 @@ describe("native sidecar bridge", () => {
     const project = structuredClone(syntheticProjectDocument);
     project.source = { ...project.source, path: "/Users/test/CT", seriesUid: "series-local", sliceCount: 12 };
     project.selection = { ...project.selection, start: 2, end: 8, tileLabels: ["A", "B"], tilePlateColumns: 2, tilePlateRows: 1, tileThicknessMm: 0.4 };
-    project.scene = [...project.scene, { id: "mesh-1", name: "Imported mesh", kind: "fixture", region: "measurement", tool: "T1", transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 2, y: 2, z: 2 } }, dimensionsMm: { x: 2, y: 2, z: 2 }, vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces: [[0, 1, 2]], visible: true }];
+    project.scene = [...project.scene, { id: "mesh-1", name: "Imported mesh", kind: "fixture", region: "measurement", tool: "T1", transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 2, y: 2, z: 2 } }, dimensionsMm: { x: 2, y: 2, z: 2 }, vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], faces: [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], visible: true }];
     const client = new NativeSidecarClient();
     const selection = await client.createPrintSelection(project);
     expect(selection.selectionId).toBe("native-selection-1");
@@ -59,16 +59,41 @@ describe("native sidecar bridge", () => {
     const created = requests.find((request) => request.operation === "create_print_selection");
     expect(created?.payload).toMatchObject({ plane: "axial", start_index: 2, end_index: 8, labels: ["A", "B"] });
     expect(created?.payload).not.toHaveProperty("source");
-    expect(created?.payload).not.toHaveProperty("structural_regions");
+    expect(created?.payload.structural_regions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "scene-reference-box", owner: "T1:fixture", structural: true, marker_type: "anchor" }),
+      expect.objectContaining({ id: "scene-airway-support", owner: "T1:support", structural: true, marker_type: "tab" }),
+    ]));
     const validated = await client.validateScene(project);
     expect(validated.valid).toBe(true);
     const sceneRequest = (invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "validate_scene") as { payload: { scene: { regions: Array<{ geometry: { dimensions: { x: number; y: number; z: number }; vertices?: number[][]; faces?: number[][] } }> } } });
-    expect(sceneRequest.payload.scene.regions.find((region) => region.geometry.vertices)?.geometry).toMatchObject({ vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces: [[0, 1, 2]] });
+    expect(sceneRequest.payload.scene.regions.find((region) => region.geometry.vertices)?.geometry).toMatchObject({ vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], faces: [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]] });
     await client.generateToolpath(project);
-    const generation = invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "generate_toolpath") as { payload: { tool: string; calibration: Array<{ binding: { pitch_mm: number; layer_height_mm: number; flow_mm3_s: number } }> } };
-    expect(generation.payload.tool).toBe("T0");
+    const generation = invoke.mock.calls.map((call) => call[1]?.request).find((request: { operation: string }) => request.operation === "generate_toolpath") as { payload: { tool?: string; calibration: Array<{ binding: { tool: string; pitch_mm: number; layer_height_mm: number; flow_mm3_s: number } }>; scene: { regions: Array<{ bounds_mm: { x: number[]; y: number[] } }> } } };
+    expect(generation.payload.tool).toBeUndefined();
+    expect(generation.payload.calibration.map((profile) => profile.binding.tool)).toEqual(["T0", "T1"]);
     expect(generation.payload.calibration[0].binding).toMatchObject({ pitch_mm: 0.4, layer_height_mm: 0.2, flow_mm3_s: 1.2 });
+    expect(generation.payload.scene.regions[0].bounds_mm).toEqual(expect.objectContaining({ x: expect.any(Array), y: expect.any(Array) }));
     const exported = await client.exportRunPackage(project);
     expect(exported).toMatchObject({ packageName: "run-package-1", packageDirectory: "/Users/test/CT/.voxelweave-cache/run-package-1", files: ["toolpath.gcode", "hashes.json"] });
+  });
+
+  it("preserves an explicitly selected DICOM file group and caches beside it", async () => {
+    const project = structuredClone(syntheticProjectDocument);
+    project.source = {
+      ...project.source,
+      path: "/Users/test/CT/one.dcm",
+      inputPaths: ["/Users/test/CT/one.dcm", "/Users/test/CT/two.dcm"],
+      seriesUid: "series-local",
+      sliceCount: 2,
+    };
+    const client = new NativeSidecarClient();
+    await client.inspectDicomSource(project);
+    await client.exportRunPackage(project);
+    const requests = invoke.mock.calls.map((call) => call[1]?.request).filter(Boolean) as Array<{ operation: string; payload: Record<string, unknown> }>;
+    expect(requests.find((request) => request.operation === "inspect_dicom_source")?.payload).toMatchObject({
+      source: "/Users/test/CT/one.dcm",
+      sources: ["/Users/test/CT/one.dcm", "/Users/test/CT/two.dcm"],
+    });
+    expect(requests.find((request) => request.operation === "export_run_package")?.payload.directory).toBe("/Users/test/CT/.voxelweave-cache/run-package");
   });
 });

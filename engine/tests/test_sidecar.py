@@ -12,6 +12,7 @@ from voxelweave.engine import EngineSession
 from voxelweave.errors import CancellationError, DicomValidationError, ProtocolError
 from voxelweave.protocol import MAX_ARRAY_ITEMS, MAX_JSONL_BYTES, ControlEnvelope, Operation
 from voxelweave.sidecar import serve_jsonl
+from voxelweave.synthetic import write_synthetic_dicom_series
 
 
 def _response_lines(output: io.StringIO) -> list[dict[str, object]]:
@@ -123,3 +124,32 @@ def test_create_selection_accepts_exact_native_transport_payload() -> None:
     manifest = session.handle(ControlEnvelope("native-selection", Operation.CREATE_PRINT_SELECTION, payload))
     assert manifest["print_size_mm"][2] == 1.5
     assert manifest["structural_regions"][-1]["region"] == "measurement_roi"
+
+
+def test_engine_session_inspects_and_selects_explicit_file_group(tmp_path: Path) -> None:
+    source_dir = tmp_path / "explicit-files"
+    write_synthetic_dicom_series(
+        source_dir,
+        volume=create_synthetic_volume(pattern="ramp", shape_zyx=(4, 8, 9), hu_min=-900, hu_max=300),
+    )
+    sources = [str(path) for path in sorted(source_dir.glob("*.dcm"))]
+    assert len(sources) == 4
+    session = EngineSession()
+    inspection = session.handle(
+        ControlEnvelope(
+            "inspect-file-group",
+            Operation.INSPECT_DICOM_SOURCE,
+            {"source": sources[0], "sources": sources},
+        )
+    )
+    series_uid = str(inspection["series"][0]["series_uid"])
+    selected = session.handle(
+        ControlEnvelope(
+            "select-file-group",
+            Operation.SELECT_DICOM_SERIES,
+            {"source": sources[0], "sources": sources, "series_uid": series_uid},
+        )
+    )
+    assert selected["instance_count"] == 4
+    assert session.volume is not None
+    assert session.volume.shape_zyx == (4, 8, 9)

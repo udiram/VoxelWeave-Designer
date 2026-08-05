@@ -86,7 +86,7 @@ class EngineSession:
     """
 
     inspection: DicomInspection | None = None
-    source: str | None = None
+    source: str | tuple[str, ...] | None = None
     volume: Volume | None = None
     selection: Any | None = None
     generated: Any | None = None
@@ -187,6 +187,19 @@ class EngineSession:
                 )
         return str(fixture_path)
 
+    def _resolve_source_payload(self, payload: Mapping[str, Any]) -> str | tuple[str, ...]:
+        """Resolve either one directory/archive path or an explicit file group."""
+
+        raw_sources = payload.get("sources")
+        if isinstance(raw_sources, (list, tuple)):
+            resolved = tuple(self._resolve_source(str(item)) for item in raw_sources if str(item).strip())
+            if not resolved:
+                raise EngineError("Choose at least one DICOM source path.")
+            return resolved[0] if len(resolved) == 1 else resolved
+        if payload.get("source") is None:
+            raise EngineError("Choose a DICOM source before inspecting it.")
+        return self._resolve_source(str(payload["source"]))
+
     def _workspace_path(self, value: object, default_name: str) -> str:
         self._ensure_open()
         candidate = Path(str(value)) if value is not None else Path(default_name)
@@ -210,11 +223,11 @@ class EngineSession:
         try:
             op = envelope.operation
             if op == Operation.INSPECT_DICOM_SOURCE:
-                self.source = self._resolve_source(str(payload["source"]))
+                self.source = self._resolve_source_payload(payload)
                 self.inspection = inspect_dicom_source(self.source, request_id=envelope.request_id, cancellation=token, progress=callback)
                 return self.inspection.to_dict()
             if op == Operation.SELECT_DICOM_SERIES:
-                source = self._resolve_source(str(payload["source"])) if payload.get("source") is not None else self.source
+                source = self._resolve_source_payload(payload) if payload.get("source") is not None or payload.get("sources") is not None else self.source
                 if source is None:
                     raise EngineError("Select a DICOM source before selecting a series.")
                 inspection = self.inspection if source == self.source and self.inspection is not None else inspect_dicom_source(source, request_id=envelope.request_id, cancellation=token, progress=callback)
