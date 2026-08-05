@@ -16,6 +16,7 @@ on:
         default: development-prerelease
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
