@@ -112,19 +112,51 @@ class PrintSelection:
     def source_axes(self) -> tuple[int, int, int]:
         return _axis_map(self.plane)
 
+    @property
+    def source_sample_bounds_low_xyz(self) -> np.ndarray:
+        """Lowest source voxel coordinate used by scientific sampling.
+
+        ``source_bounds_low_xyz`` describes the in-plane crop.  A continuous
+        selection has a second, independent normal-axis slab; conflating that
+        slab with the crop causes a range selection to interpolate through
+        unselected anatomy.  Keep this derived view centralized so sampling,
+        transforms, and manifests use the same physical endpoints.
+        """
+
+        low = self.source_bounds_low_xyz.copy()
+        if self.mode == "continuous":
+            low[self.source_axes[2]] = float(self.selected_source_indices[0])
+        return low
+
+    @property
+    def source_sample_bounds_high_xyz(self) -> np.ndarray:
+        """Highest source voxel coordinate used by scientific sampling."""
+
+        high = self.source_bounds_high_xyz.copy()
+        if self.mode == "continuous":
+            high[self.source_axes[2]] = float(self.selected_source_indices[-1])
+        return high
+
     def _source_voxel_xyz(self, x_mm: float, y_mm: float, z_mm: float, *, tile_index: int | None = None) -> np.ndarray:
         if not (0.0 <= x_mm <= self.print_size_mm[0] + 1e-6 and 0.0 <= y_mm <= self.print_size_mm[1] + 1e-6 and 0.0 <= z_mm <= self.print_size_mm[2] + 1e-6):
             raise GeometryValidationError("Print sample is outside the selected physical crop.")
         axes = self.source_axes
         source = np.zeros(3, dtype=np.float64)
+        sample_low = self.source_sample_bounds_low_xyz
+        sample_high = self.source_sample_bounds_high_xyz
         for print_coord, axis, size in ((x_mm, axes[0], self.print_size_mm[0]), (y_mm, axes[1], self.print_size_mm[1])):
             fraction = 0.0 if size <= 0 else np.clip(print_coord / size, 0.0, 1.0)
-            source[axis] = self.source_bounds_low_xyz[axis] + fraction * (self.source_bounds_high_xyz[axis] - self.source_bounds_low_xyz[axis])
+            source[axis] = sample_low[axis] + fraction * (sample_high[axis] - sample_low[axis])
         if self.mode == "single":
             source[axes[2]] = float(self.selected_source_indices[0])
         elif self.mode == "continuous":
-            fraction = 0.0 if self.print_size_mm[2] <= 0 else np.clip(z_mm / self.print_size_mm[2], 0.0, 1.0)
-            source[axes[2]] = self.source_bounds_low_xyz[axes[2]] + fraction * (self.source_bounds_high_xyz[axes[2]] - self.source_bounds_low_xyz[axes[2]])
+            # Map printer layer centres to the selected source-slice centres.
+            # The first/last layer centres are the slab endpoints; clamping the
+            # half-layer boundary keeps direct edge queries fail-closed rather
+            # than sampling an adjacent, unselected slice.
+            centre_span = max(self.print_size_mm[2] - self.layer_height_mm, 0.0)
+            fraction = 0.0 if centre_span <= 0 else np.clip((z_mm - 0.5 * self.layer_height_mm) / centre_span, 0.0, 1.0)
+            source[axes[2]] = sample_low[axes[2]] + fraction * (sample_high[axes[2]] - sample_low[axes[2]])
         else:
             chosen = tile_index if tile_index is not None else 0
             if chosen < 0 or chosen >= len(self.selected_source_indices):
@@ -203,11 +235,15 @@ def create_print_selection(
         end = source_high if end_index is None else int(end_index)
         if start < 0 or end >= source_count or end < start:
             raise GeometryValidationError("Selected source range must be an inclusive in-volume index range.")
-        selected_indices = tuple(range(start, end + 1, stride))
+        selected_indices = tuple(range(start, end + 1, stride if mode == "tile" else 1))
         if not selected_indices:
             raise GeometryValidationError("Selected source range produced no planes.")
         axis_spacing = volume.spacing_mm[2 - normal_axis]
         depth_mm = axis_spacing if mode == "tile" else float((end - start + 1) * axis_spacing)
+        crop_start = int(math.ceil(low[normal_axis] - 1e-6))
+        crop_end = int(math.floor(high[normal_axis] + 1e-6))
+        if start < crop_start or end > crop_end:
+            raise GeometryValidationError("Selected source range must lie within the physical crop.")
     inplane_axes = axes[:2]
     natural_size = tuple(float((high[axis] - low[axis] + 1.0) * (volume.spacing_mm[2 - axis] if axis < 2 else volume.spacing_mm[0])) for axis in inplane_axes)
     if any(item <= 0 for item in natural_size):
@@ -231,17 +267,22 @@ def create_print_selection(
         }
         for index in range(len(selected_indices))
     ) if mode == "tile" else ()
-    transform = _transform_for_selection(volume, plane, low, high, requested_size)
+    sample_low = low.copy()
+    sample_high = high.copy()
+    if mode == "continuous":
+        sample_low[normal_axis] = float(selected_indices[0])
+        sample_high[normal_axis] = float(selected_indices[-1])
+    transform = _transform_for_selection(volume, plane, sample_low, sample_high, requested_size)
     crop_min = cast(Vec3, tuple(float(item) for item in volume.voxel_to_lps(tuple(float(value) for value in low))))
     crop_max = cast(Vec3, tuple(float(item) for item in volume.voxel_to_lps(tuple(float(value) for value in high))))
-    low_tuple = cast(Vec3, tuple(float(item) for item in low))
-    high_tuple = cast(Vec3, tuple(float(item) for item in high))
     manifest = SelectionManifest(
         plane=plane,
         mode=mode,
         crop_min_lps=crop_min,
         crop_max_lps=crop_max,
-        source_bounds_voxel_xyz=(low_tuple, high_tuple),
+        # Persist the scientific slab bounds, not only the in-plane crop.  The
+        # crop remains represented by crop_min_lps/crop_max_lps.
+        source_bounds_voxel_xyz=(cast(Vec3, tuple(float(item) for item in sample_low)), cast(Vec3, tuple(float(item) for item in sample_high))),
         selected_source_indices=selected_indices,
         stride=stride,
         print_size_mm=requested_size,

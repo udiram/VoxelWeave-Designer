@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import mkdtemp
 from threading import Lock
 from typing import Any, cast
+from uuid import uuid4
+
+import numpy as np
 
 from .binary import write_binary_array
 from .calibration import Calibration, CalibrationSet
 from .dicom import DicomInspection, Volume, inspect_dicom_source, load_dicom_series, select_dicom_series
-from .errors import EngineError, ProtocolError
+from .errors import EngineError, GeometryValidationError, ProtocolError
 from .models import CancellationToken, ProgressCallback
 from .mpr import (
     build_volume_cache,
@@ -43,9 +48,58 @@ class EngineSession:
     generated: Any | None = None
     _cancellations: dict[str, CancellationToken] = field(default_factory=dict)
     _cancellation_lock: Lock = field(default_factory=Lock)
-    _workspace: Path = field(default_factory=lambda: Path(mkdtemp(prefix="voxelweave-sidecar-")))
+    workspace: str | Path | None = None
+    _workspace: Path = field(init=False)
+    _closed: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Create a scoped workspace with an explicit, bounded lifecycle.
+
+        A caller may provide an Application Support/cache root.  We still
+        create and own a per-session child so closing a session cannot remove
+        unrelated user files.  With no root, the child is a private temporary
+        directory and is removed on ``close``/context exit.
+        """
+
+        if self.workspace is None:
+            self._workspace = Path(mkdtemp(prefix="voxelweave-sidecar-"))
+        else:
+            root = Path(self.workspace).expanduser()
+            root.mkdir(parents=True, exist_ok=True)
+            self._workspace = Path(mkdtemp(prefix=f"session-{uuid4().hex[:12]}-", dir=str(root)))
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise EngineError("Engine session is closed; create a new session before issuing requests.")
+
+    def cleanup(self) -> None:
+        """Remove all session-owned temporary caches and artifacts."""
+
+        if self._closed:
+            return
+        with self._cancellation_lock:
+            for token in self._cancellations.values():
+                token.cancel()
+            self._cancellations.clear()
+        shutil.rmtree(self._workspace, ignore_errors=True)
+        self._closed = True
+
+    close = cleanup
+
+    def __enter__(self) -> EngineSession:
+        self._ensure_open()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
+        self.cleanup()
+
+    def __del__(self) -> None:
+        # Destructors must never mask an interpreter-shutdown exception.
+        with suppress(Exception):
+            self.cleanup()
 
     def _token(self, request_id: str) -> CancellationToken:
+        self._ensure_open()
         with self._cancellation_lock:
             token = self._cancellations.get(request_id)
             if token is None:
@@ -56,9 +110,11 @@ class EngineSession:
     def register_request(self, request_id: str) -> None:
         """Reserve a cooperative token before a worker thread starts."""
 
+        self._ensure_open()
         self._token(request_id)
 
     def cancel(self, request_id: str) -> dict[str, Any]:
+        self._ensure_open()
         with self._cancellation_lock:
             token = self._cancellations.get(request_id)
         if token is None:
@@ -88,6 +144,7 @@ class EngineSession:
         return str(fixture_path)
 
     def _workspace_path(self, value: object, default_name: str) -> str:
+        self._ensure_open()
         candidate = Path(str(value)) if value is not None else Path(default_name)
         if not candidate.is_absolute():
             candidate = self._workspace / candidate
@@ -99,6 +156,7 @@ class EngineSession:
         return self.volume
 
     def handle(self, envelope: ControlEnvelope, *, progress: ProgressCallback | None = None) -> dict[str, Any]:
+        self._ensure_open()
         if envelope.operation == Operation.CANCEL:
             target = str(envelope.payload.get("request_id", ""))
             return self.cancel(target)
@@ -164,6 +222,10 @@ class EngineSession:
             if op == Operation.GENERATE_TOOLPATH:
                 if self.selection is None:
                     raise EngineError("Create a print selection before generating a toolpath.")
+                if payload.get("scene") is not None:
+                    scene_result = validate_scene(payload.get("scene", {}))
+                    if not scene_result["passed"]:
+                        raise GeometryValidationError("Scene canonical geometry validation failed: " + "; ".join(scene_result["errors"]))
                 calibration_value = payload.get("calibration")
                 if calibration_value is None:
                     raise EngineError("Generation requires an explicit calibration object.")
@@ -178,6 +240,7 @@ class EngineSession:
                     profile=PrinterProfile(**dict(payload.get("profile", {}))),
                     tool=(str(payload["tool"]) if payload.get("tool") is not None else None),
                     allow_calibration_clipping=bool(payload.get("allow_calibration_clipping", False)),
+                    acknowledge_calibration_clipping=bool(payload.get("acknowledge_calibration_clipping", False)),
                     request_id=envelope.request_id,
                     cancellation=token,
                     progress=callback,
@@ -214,7 +277,14 @@ class EngineSession:
 
 
 def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the bounded scene contract without claiming canonical CSG fidelity."""
+    """Validate scene ownership and canonical geometry inputs fail-closed.
+
+    Primitive dimensions and explicit ownership can be checked without an
+    optional native geometry dependency.  Imported meshes and Boolean CSG are
+    never accepted on a bounded metadata check: they require ``manifold3d``
+    and valid topology.  This keeps the engine honest when the package is
+    deployed without the native extension.
+    """
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -223,6 +293,62 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
         errors.append("Scene regions must be an array.")
         regions = []
     identifiers: set[str] = set()
+    manifold_available = False
+    manifold_error: str | None = None
+    try:
+        from manifold3d import Manifold, Mesh  # type: ignore[import-not-found]
+
+        manifold_available = True
+    except Exception as exc:  # pragma: no cover - exercised on native package builds
+        manifold_error = f"manifold3d unavailable: {type(exc).__name__}"
+
+    def finite_positive(value: object, label: str) -> bool:
+        try:
+            number = float(cast(Any, value))
+        except (TypeError, ValueError):
+            errors.append(f"{label} must be a finite positive number.")
+            return False
+        if not np.isfinite(number) or number <= 0:
+            errors.append(f"{label} must be a finite positive number.")
+            return False
+        return True
+
+    def validate_mesh(region_id: str, geometry: Mapping[str, Any]) -> None:
+        vertices = geometry.get("vertices")
+        faces = geometry.get("faces")
+        if not isinstance(vertices, list) or not isinstance(faces, list):
+            errors.append(f"Scene region {region_id} imported mesh requires vertices and faces for topology validation.")
+            return
+        if len(vertices) < 4 or not all(isinstance(item, (list, tuple)) and len(item) == 3 for item in vertices):
+            errors.append(f"Scene region {region_id} imported mesh has invalid vertex topology.")
+            return
+        if not faces or not all(isinstance(item, (list, tuple)) and len(item) >= 3 for item in faces):
+            errors.append(f"Scene region {region_id} imported mesh has invalid face topology.")
+            return
+        try:
+            vertex_array = np.asarray(vertices, dtype=np.float64)
+            face_array = np.asarray(faces, dtype=np.int64)
+        except (TypeError, ValueError):
+            errors.append(f"Scene region {region_id} imported mesh contains non-numeric topology.")
+            return
+        if not np.all(np.isfinite(vertex_array)) or np.any(face_array < 0) or np.any(face_array >= len(vertices)):
+            errors.append(f"Scene region {region_id} imported mesh contains invalid coordinates or face indices.")
+            return
+        if not manifold_available:
+            errors.append(f"Scene region {region_id} requires canonical manifold3d validation; {manifold_error}.")
+            return
+        try:  # manifold3d's constructor performs duplicate/non-manifold checks.
+            triangles = []
+            for face_value in faces:
+                face = [int(cast(Any, item)) for item in cast(list[object], face_value)]
+                for index in range(1, len(face) - 1):
+                    triangles.append((face[0], face[index], face[index + 1]))
+            Mesh(vert=vertex_array, tri=np.asarray(triangles, dtype=np.int32))
+            # Constructing a Manifold also validates the resulting mesh.
+            Manifold(Mesh(vert=vertex_array, tri=np.asarray(triangles, dtype=np.int32)))
+        except Exception as exc:  # pragma: no cover - depends on native extension
+            errors.append(f"Scene region {region_id} failed manifold3d topology validation: {type(exc).__name__}.")
+
     for region in regions:
         if not isinstance(region, Mapping):
             errors.append("Every scene region must be an object with explicit ownership.")
@@ -237,6 +363,35 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
             errors.append(f"Scene region {identifier or '<unnamed>'} has an ambiguous overlap.")
         if region.get("boolean_operands") and not isinstance(region["boolean_operands"], list):
             errors.append(f"Scene region {identifier or '<unnamed>'} has invalid Boolean operands.")
+        if region.get("ambiguous_overlap") or region.get("overlap_policy") in {None, "ambiguous"} and region.get("overlaps"):
+            errors.append(f"Scene region {identifier or '<unnamed>'} has an unresolved overlap policy.")
+        geometry_value = region.get("geometry", region)
+        geometry = geometry_value if isinstance(geometry_value, Mapping) else {}
+        kind = str(geometry.get("kind", region.get("kind", ""))).lower()
+        if kind in {"box", "cube", "cylinder", "wedge", "prism", "polygon_prism"}:
+            dimensions = geometry.get("dimensions", geometry.get("size", geometry.get("scale")))
+            if dimensions is None:
+                errors.append(f"Scene region {identifier or '<unnamed>'} primitive is missing dimensions.")
+            elif isinstance(dimensions, Mapping):
+                for axis in ("x", "y", "z"):
+                    finite_positive(dimensions.get(axis), f"Scene region {identifier or '<unnamed>'} dimension {axis}")
+            elif isinstance(dimensions, (list, tuple)):
+                if len(dimensions) != 3:
+                    errors.append(f"Scene region {identifier or '<unnamed>'} primitive dimensions must have three entries.")
+                else:
+                    for axis, value in zip(("x", "y", "z"), dimensions, strict=True):
+                        finite_positive(value, f"Scene region {identifier or '<unnamed>'} dimension {axis}")
+            else:
+                errors.append(f"Scene region {identifier or '<unnamed>'} primitive dimensions are invalid.")
+        if kind in {"imported", "stl", "3mf", "mesh", "imported_mesh"} or "vertices" in geometry or "faces" in geometry:
+            validate_mesh(identifier or "<unnamed>", geometry)
+        operands = geometry.get("boolean_operands", region.get("boolean_operands"))
+        operation = geometry.get("boolean_operation", geometry.get("operation"))
+        if operands or operation:
+            if not isinstance(operands, list) or len(operands) < 2 or str(operation).lower() not in {"union", "subtract", "intersection"}:
+                errors.append(f"Scene region {identifier or '<unnamed>'} has an invalid Boolean CSG contract.")
+            elif not manifold_available:
+                errors.append(f"Scene region {identifier or '<unnamed>'} requires canonical manifold3d Boolean validation; {manifold_error}.")
     if not regions:
         warnings.append("Scene contains no printable regions.")
     return {
@@ -244,5 +399,7 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
         "passed": not errors,
         "errors": errors,
         "warnings": warnings,
-        "physical_geometry_claim": "canonical_geometry_validation_required_for_generation",
+        "canonical_geometry_validation": "manifold3d" if manifold_available else "primitive_contract_only",
+        "canonical_geometry_dependency": "available" if manifold_available else manifold_error,
+        "physical_geometry_claim": "canonical_geometry_validated" if not errors and manifold_available else "canonical_geometry_validation_required_for_generation",
     }

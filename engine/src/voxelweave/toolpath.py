@@ -32,12 +32,37 @@ class PrinterProfile:
     max_line_width_mm: float = 1.0
     sample_step_mm: float = 2.0
     wrapper_id: str = "voxelweave.prusa-xl.wrapper.v1"
+    # Wrapper controls are explicit and deterministic.  Heating remains off by
+    # default because generating a research artifact must not implicitly start
+    # a thermal/print operation when the file is later opened on a printer.
+    home_before_print: bool = True
+    heat_nozzle: bool = False
+    nozzle_temperature_c: float = 0.0
+    heat_bed: bool = False
+    bed_temperature_c: float = 0.0
+    prime_enabled: bool = False
+    prime_length_mm: float = 0.0
+    first_layer_speed_scale: float = 0.5
+    park_after_print: bool = True
+    park_position_mm: Vec3 = (0.0, 0.0, 5.0)
 
     def __post_init__(self) -> None:
         if any(float(item) <= 0 for item in self.build_volume_mm) or self.filament_diameter_mm <= 0 or self.max_flow_mm3_s <= 0:
             raise GeometryValidationError("Printer profile dimensions and flow limits must be positive.")
         if self.min_line_width_mm <= 0 or self.max_line_width_mm < self.min_line_width_mm or self.sample_step_mm <= 0:
             raise GeometryValidationError("Printer profile width and sampling limits are invalid.")
+        if not 0.0 < self.first_layer_speed_scale <= 1.0 or not math.isfinite(self.first_layer_speed_scale):
+            raise GeometryValidationError("First-layer speed scale must be finite and in (0, 1].")
+        if self.heat_nozzle and self.nozzle_temperature_c <= 0:
+            raise GeometryValidationError("A positive nozzle temperature is required when nozzle heating is enabled.")
+        if self.heat_bed and self.bed_temperature_c <= 0:
+            raise GeometryValidationError("A positive bed temperature is required when bed heating is enabled.")
+        if self.prime_enabled and self.prime_length_mm <= 0:
+            raise GeometryValidationError("A positive prime length is required when priming is enabled.")
+        if len(self.park_position_mm) != 3 or any(not math.isfinite(float(item)) for item in self.park_position_mm):
+            raise GeometryValidationError("Park position must contain three finite coordinates.")
+        if any(float(item) < 0 or float(item) > float(limit) for item, limit in zip(self.park_position_mm, self.build_volume_mm, strict=True)):
+            raise GeometryValidationError("Park position must remain inside the configured build volume.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,9 +242,16 @@ def _extrusion_and_feedrate(
 ) -> tuple[float, float]:
     filament_area = math.pi * (profile.filament_diameter_mm / 2.0) ** 2
     volume = length * width * layer_height
-    max_feed = min(profile.max_flow_mm3_s, calibration_flow_mm3_s) * 60.0 / max(width * layer_height, 1e-9)
+    if length <= 0 or width <= 0 or layer_height <= 0:
+        raise GeometryValidationError("Printable segment length, width, and layer height must be positive.")
+    max_flow = min(profile.max_flow_mm3_s, calibration_flow_mm3_s)
+    # The volumetric cap is a hard safety limit.  A minimum-speed preference
+    # must never be clamped back up when a wide road/layer would require a
+    # slower feed to stay below that cap.
+    max_feed = max_flow * 60.0 / (width * layer_height)
     feed = min(profile.max_print_speed_mm_min, max_feed)
-    feed = max(profile.min_print_speed_mm_min, feed)
+    if not math.isfinite(feed) or feed <= 0:
+        raise GeometryValidationError("No positive feedrate satisfies the configured volumetric-flow cap.")
     extrusion = volume / filament_area
     return extrusion, feed
 
@@ -233,19 +265,70 @@ def _segment_comment(segment: ToolpathSegment) -> str:
     )
 
 
-def _format_gcode(segments: Sequence[ToolpathSegment], profile: PrinterProfile, source_hash: str) -> str:
+def _format_gcode(
+    segments: Sequence[ToolpathSegment],
+    profile: PrinterProfile,
+    source_hash: str,
+    *,
+    layer_height_mm: float,
+    calibration_flow_mm3_s: float,
+) -> str:
     lines = [
         "; VoxelWeave Designer research-use deterministic toolpath",
         "; VW_BEGIN",
         f"; VW_WRAPPER_ID={profile.wrapper_id}",
         f"; VW_SOURCE_HASH={source_hash}",
+        "; VW_WRAPPER_CONTRACT=prusa-xl-safe-research-v2",
+        f"; VW_HOME_BEFORE_PRINT={int(profile.home_before_print)}",
+        f"; VW_HEAT_NOZZLE={int(profile.heat_nozzle)}",
+        f"; VW_NOZZLE_TEMPERATURE_C={profile.nozzle_temperature_c:.3f}",
+        f"; VW_HEAT_BED={int(profile.heat_bed)}",
+        f"; VW_BED_TEMPERATURE_C={profile.bed_temperature_c:.3f}",
+        f"; VW_PRIME_ENABLED={int(profile.prime_enabled)}",
+        f"; VW_PRIME_LENGTH_MM={profile.prime_length_mm:.6f}",
+        f"; VW_FIRST_LAYER_SPEED_SCALE={profile.first_layer_speed_scale:.6f}",
+        f"; VW_PARK_AFTER_PRINT={int(profile.park_after_print)}",
+        f"; VW_PARK_POSITION_MM={profile.park_position_mm[0]:.5f},{profile.park_position_mm[1]:.5f},{profile.park_position_mm[2]:.5f}",
+        f"; VW_MAX_FLOW_MM3_S={profile.max_flow_mm3_s:.9g}",
+        f"; VW_CALIBRATION_FLOW_MM3_S={calibration_flow_mm3_s:.9g}",
+        f"; VW_LAYER_HEIGHT_MM={layer_height_mm:.9g}",
+        f"; VW_FILAMENT_DIAMETER_MM={profile.filament_diameter_mm:.9g}",
         "; VW_SCIENTIFIC_BOUNDARY=software_audit_does_not_establish_physical_fidelity",
         "G90",
         "M82",
         "G21",
         "G92 E0",
     ]
-    cumulative_e = 0.0
+    if profile.home_before_print:
+        lines.append("G28")
+    if profile.heat_bed:
+        lines.extend([f"M140 S{profile.bed_temperature_c:.1f}", f"M190 S{profile.bed_temperature_c:.1f}"])
+    if profile.heat_nozzle:
+        lines.extend([f"M104 S{profile.nozzle_temperature_c:.1f}", f"M109 S{profile.nozzle_temperature_c:.1f}"])
+    # Priming is represented as an explicit control marker.  Actual extrusion
+    # remains disabled by default and is intentionally not mixed into the
+    # audited measurement stream.
+    if profile.prime_enabled:
+        prime_width = max(profile.min_line_width_mm, min(profile.max_line_width_mm, profile.filament_diameter_mm * 0.5))
+        prime_feed = min(
+            profile.max_print_speed_mm_min,
+            min(profile.max_flow_mm3_s, calibration_flow_mm3_s) * 60.0 / max(prime_width * layer_height_mm, 1e-9),
+        )
+        prime_feed = math.floor(prime_feed * 1000.0) / 1000.0
+        prime_e = profile.prime_length_mm * prime_width * layer_height_mm / (math.pi * (profile.filament_diameter_mm / 2.0) ** 2)
+        prime_y = max(0.0, profile.build_volume_mm[1] - prime_width)
+        lines.extend(
+            [
+                "; VW_PRIME_BEGIN",
+                f"; VW_AUX_PRIME start_x=0.00000 start_y={prime_y:.5f} width={prime_width:.8f}",
+                f"G0 X0.00000 Y{prime_y:.5f} Z{layer_height_mm:.5f}",
+                f"G1 X{profile.prime_length_mm:.5f} Y{prime_y:.5f} Z{layer_height_mm:.5f} E{prime_e:.8f} F{prime_feed:.3f}",
+                "; VW_PRIME_END",
+            ]
+        )
+    else:
+        prime_e = 0.0
+    cumulative_e = prime_e
     current_tool: str | None = None
     previous_end: tuple[float, float] | None = None
     previous_z: float | None = None
@@ -260,10 +343,13 @@ def _format_gcode(segments: Sequence[ToolpathSegment], profile: PrinterProfile, 
         lines.append(_segment_comment(segment))
         lines.append(
             f"G1 X{segment.end_xy_mm[0]:.5f} Y{segment.end_xy_mm[1]:.5f} Z{segment.z_mm:.5f} "
-            f"E{cumulative_e:.5f} F{segment.feedrate_mm_min:.3f}"
+            f"E{cumulative_e:.8f} F{segment.feedrate_mm_min:.3f}"
         )
         previous_end = segment.end_xy_mm
         previous_z = segment.z_mm
+    if profile.park_after_print:
+        px, py, pz = profile.park_position_mm
+        lines.append(f"G0 X{px:.5f} Y{py:.5f} Z{pz:.5f}")
     lines.extend(["; VW_END", "M104 S0", "M140 S0", "M84"])
     return "\n".join(lines) + "\n"
 
@@ -298,11 +384,16 @@ def generate_toolpath(
     profile: PrinterProfile | None = None,
     tool: str | None = None,
     allow_calibration_clipping: bool = False,
+    acknowledge_calibration_clipping: bool = False,
     request_id: str = "toolpath",
     progress: ProgressCallback | None = None,
     cancellation: CancellationToken | None = None,
 ) -> GeneratedToolpath:
     profile = profile or PrinterProfile()
+    if allow_calibration_clipping and not acknowledge_calibration_clipping:
+        raise CalibrationMismatchError(
+            "Calibration clipping is fail-closed; set acknowledge_calibration_clipping=True to export clipped output."
+        )
     selected_calibration = _resolve_calibration(calibration, tool)
     _profile_binding(selection, selected_calibration, profile)
     pitch = selected_calibration.binding.pitch_mm
@@ -323,6 +414,10 @@ def generate_toolpath(
     positions_y = _positions(selection.print_size_mm[1], pitch)
     total_layers = selection.layer_count * tile_count
     completed = 0
+    clipped_count = 0
+    clipped_by_layer: dict[str, int] = {}
+    clipped_by_tile: dict[str, int] = {}
+    clipped_by_region: dict[str, int] = {}
     for tile_index in range(tile_count):
         offset_x, offset_y = tile_plate_offset(tile_index)
         for layer_index in range(selection.layer_count):
@@ -354,6 +449,19 @@ def generate_toolpath(
                         profile,
                         selected_calibration.binding.effective_flow_mm3_s,
                     )
+                    if layer_index == 0:
+                        feedrate *= profile.first_layer_speed_scale
+                    # The emitted F field has three decimals.  Round down so
+                    # serialization can never push a legal cap over its hard
+                    # volumetric-flow limit.
+                    feedrate = math.floor(feedrate * 1000.0) / 1000.0
+                    if range_status == "clipped":
+                        clipped_count += 1
+                        clipped_by_layer[str(layer_index)] = clipped_by_layer.get(str(layer_index), 0) + 1
+                        tile_key = str(tile_index if selection.mode == "tile" else 0)
+                        clipped_by_tile[tile_key] = clipped_by_tile.get(tile_key, 0) + 1
+                        region_key = "measurement_roi" if selection.mode != "tile" else "measurement_roi_tile"
+                        clipped_by_region[region_key] = clipped_by_region.get(region_key, 0) + 1
                     segments.append(
                         ToolpathSegment(
                             segment_index=len(segments),
@@ -391,7 +499,13 @@ def generate_toolpath(
         raise GeometryValidationError("Generated toolpath exceeds the configured printer build volume.")
     tool_names = tuple(sorted({segment.tool for segment in segments}))
     preview = _preview_records(segments, tool_names)
-    gcode = _format_gcode(segments, profile, selection.volume.source_hash)
+    gcode = _format_gcode(
+        segments,
+        profile,
+        selection.volume.source_hash,
+        layer_height_mm=selection.layer_height_mm,
+        calibration_flow_mm3_s=selected_calibration.binding.effective_flow_mm3_s,
+    )
     result = GeneratedToolpath(
         selection=selection,
         segments=tuple(segments),
@@ -407,6 +521,14 @@ def generate_toolpath(
             "tile_count": tile_count,
             "calibration_ids": [selected_calibration.calibration_id],
             "preview_is_non_authoritative": True,
+            "clipping": {
+                "occurred": clipped_count > 0,
+                "sample_count": clipped_count,
+                "acknowledged": bool(acknowledge_calibration_clipping),
+                "by_layer": clipped_by_layer,
+                "by_tile": clipped_by_tile,
+                "by_region": clipped_by_region,
+            },
             "physical_fidelity_claim": "not_established_by_software",
         },
     )
@@ -445,14 +567,55 @@ def reverse_audit_gcode(
     lines = text.splitlines()
     errors: list[str] = []
     warnings: list[str] = []
+    low_speed_warning_count = 0
     found_wrapper = next((line.split("=", 1)[1] for line in lines if line.startswith("; VW_WRAPPER_ID=")), None)
     expected_wrapper = wrapper_id or profile.wrapper_id
     if found_wrapper != expected_wrapper:
         errors.append("G-code wrapper identity does not match the expected VoxelWeave wrapper.")
+    source_hash_line = next((line for line in lines if line.startswith("; VW_SOURCE_HASH=")), None)
+    if source_hash_line is None or not source_hash_line.split("=", 1)[1].strip():
+        errors.append("G-code wrapper is missing the scientific source hash.")
     if "; VW_BEGIN" not in lines or "; VW_END" not in lines:
         errors.append("G-code is missing the VoxelWeave wrapper boundary markers.")
+    elif lines.index("; VW_BEGIN") >= lines.index("; VW_END"):
+        errors.append("G-code wrapper boundary markers are out of order.")
     if "M82" not in lines:
         errors.append("G-code must use absolute extrusion mode M82 for audited output.")
+    for required_line in ("G90", "G21", "G92 E0"):
+        if required_line not in lines:
+            errors.append(f"G-code wrapper is missing required setup command {required_line}.")
+    contract_values: dict[str, str] = {}
+    for line in lines:
+        if line.startswith("; VW_") and "=" in line:
+            key, value = line[2:].split("=", 1)
+            contract_values[key] = value
+    if contract_values.get("VW_WRAPPER_CONTRACT") != "prusa-xl-safe-research-v2":
+        errors.append("G-code is missing the supported Prusa XL research wrapper contract.")
+    try:
+        emitted_max_flow = float(contract_values["VW_MAX_FLOW_MM3_S"])
+        emitted_calibration_flow = float(contract_values["VW_CALIBRATION_FLOW_MM3_S"])
+        emitted_layer_height = float(contract_values["VW_LAYER_HEIGHT_MM"])
+        emitted_filament_diameter = float(contract_values["VW_FILAMENT_DIAMETER_MM"])
+    except (KeyError, TypeError, ValueError):
+        emitted_max_flow = profile.max_flow_mm3_s
+        emitted_calibration_flow = profile.max_flow_mm3_s
+        emitted_layer_height = 0.0
+        emitted_filament_diameter = profile.filament_diameter_mm
+        errors.append("G-code wrapper is missing finite volumetric-flow contract metadata.")
+    if emitted_max_flow <= 0 or emitted_calibration_flow <= 0 or emitted_filament_diameter <= 0:
+        errors.append("G-code wrapper volumetric-flow contract is not positive.")
+    if profile.home_before_print and "G28" not in lines:
+        errors.append("G-code wrapper is configured to home before print but emits no G28.")
+    if profile.heat_nozzle and not any(line.startswith("M109 S") for line in lines):
+        errors.append("G-code wrapper is configured to heat the nozzle but emits no wait command.")
+    if profile.heat_bed and not any(line.startswith("M190 S") for line in lines):
+        errors.append("G-code wrapper is configured to heat the bed but emits no wait command.")
+    if profile.park_after_print:
+        park = f"G0 X{profile.park_position_mm[0]:.5f} Y{profile.park_position_mm[1]:.5f} Z{profile.park_position_mm[2]:.5f}"
+        if park not in lines:
+            errors.append("G-code wrapper is configured to park but emits no deterministic park move.")
+    if profile.prime_enabled and not any(line.startswith("; VW_AUX_PRIME ") for line in lines):
+        errors.append("G-code wrapper is configured to prime but emits no deterministic auxiliary prime move.")
     expected_segments: Sequence[ToolpathSegment] = ()
     if isinstance(expected, GeneratedToolpath):
         expected_segments = expected.segments
@@ -464,6 +627,7 @@ def reverse_audit_gcode(
     parsed_count = 0
     extrusion_moves = 0
     pending: re.Match[str] | None = None
+    auxiliary_prime = False
     minimum = np.full(3, np.inf, dtype=np.float64)
     maximum = np.full(3, -np.inf, dtype=np.float64)
     for line_number, line in enumerate(lines, start=1):
@@ -476,6 +640,9 @@ def reverse_audit_gcode(
         match = _SEGMENT_RE.match(stripped)
         if match:
             pending = match
+            continue
+        if stripped.startswith("; VW_AUX_PRIME "):
+            auxiliary_prime = True
             continue
         is_print_move = stripped.startswith("G1")
         if not (is_print_move or stripped.startswith("G0")):
@@ -500,6 +667,11 @@ def reverse_audit_gcode(
             errors.append(f"Line {line_number} has non-positive extrusion for a printable move.")
             continue
         extrusion_moves += 1
+        if auxiliary_prime and pending is None:
+            if delta_e <= 0 or fields["F"] <= 0:
+                errors.append(f"Line {line_number} has invalid auxiliary prime extrusion.")
+            auxiliary_prime = False
+            continue
         if pending is None:
             errors.append(f"Line {line_number} has no VoxelWeave segment identity comment.")
             continue
@@ -528,12 +700,33 @@ def reverse_audit_gcode(
         width = float(pending.group(5))
         if width < profile.min_line_width_mm - 1e-6 or width > profile.max_line_width_mm + 1e-6:
             errors.append(f"Segment {index} commanded width exceeds the printer width contract.")
-        if fields["F"] < profile.min_print_speed_mm_min - 1e-3 or fields["F"] > profile.max_print_speed_mm_min + 1e-3:
+        if fields["F"] <= 0 or fields["F"] > profile.max_print_speed_mm_min + 1e-3:
             errors.append(f"Segment {index} feedrate exceeds the printer motion contract.")
+        elif fields["F"] < profile.min_print_speed_mm_min - 1e-3:
+            # This is advisory only: enforcing the configured floor here would
+            # force a feedrate above the hard volumetric-flow cap.
+            low_speed_warning_count += 1
+        if pending is not None and emitted_layer_height > 0:
+            segment_length = math.hypot(
+                fields["X"] - float(pending.group(9)),
+                fields["Y"] - float(pending.group(10)),
+            )
+            if segment_length <= 0:
+                errors.append(f"Segment {index} has zero printable length.")
+            else:
+                filament_area = math.pi * (emitted_filament_diameter / 2.0) ** 2
+                flow = delta_e * filament_area * fields["F"] / 60.0 / segment_length
+                hard_cap = min(emitted_max_flow, emitted_calibration_flow)
+                if flow > hard_cap + 1e-5:
+                    errors.append(f"Segment {index} exceeds the emitted volumetric-flow cap.")
         parsed_count += 1
         pending = None
     if expected_segments and parsed_count != len(expected_segments):
         errors.append("G-code segment count differs from the exact preview stream.")
+    if parsed_count == 0:
+        errors.append("G-code contains no audited printable segment moves.")
+    if low_speed_warning_count:
+        warnings.append(f"{low_speed_warning_count} segment(s) are below the preferred minimum speed to preserve the flow cap.")
     bounds = None if parsed_count == 0 else (
         (float(minimum[0]), float(minimum[1]), float(minimum[2])),
         (float(maximum[0]), float(maximum[1]), float(maximum[2])),

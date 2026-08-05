@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,7 +92,7 @@ def _sample_voxel_array(volume: Volume, voxel_xyz: np.ndarray, *, method: str) -
     if method != "linear":
         raise ValueError("MPR sampling method must be nearest or linear.")
     try:
-        from scipy.ndimage import map_coordinates
+        from scipy.ndimage import map_coordinates  # type: ignore[import-untyped]
 
         coords = np.stack((z.ravel(), y.ravel(), x.ravel()), axis=0)
         return np.asarray(map_coordinates(volume.hu, coords, order=1, mode="nearest").reshape(x.shape), dtype=np.float32)
@@ -219,6 +221,14 @@ def build_volume_cache(
 
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=True)
+    cache_parameters = {
+        "schema": "voxelweave.volume-cache-key.v1",
+        "source_hash": volume.source_hash,
+        "source_file_hashes": volume.metadata.get("source_file_hashes", []),
+        "preview_dimensions": [int(item) for item in preview_dimensions],
+        "scientific_dtype": volume.hu.dtype.str,
+    }
+    cache_key = hashlib.sha256(json.dumps(cache_parameters, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     full = write_binary_array(target / "volume_hu.bin", volume.hu, artifact_type="signed_hu_volume", metadata=volume.to_binary_metadata())
     previews: list[BinaryArtifact] = []
     for index, dimension in enumerate(preview_dimensions, start=1):
@@ -243,6 +253,8 @@ def build_volume_cache(
             progress(ProgressEvent(request_id, "build_volume_cache", "preview", index, len(preview_dimensions), "Writing display pyramid."))
     return {
         "schema": "voxelweave.volume-cache.v1",
+        "cache_key": cache_key,
+        "cache_lifecycle": "session_scoped_cleanup_required",
         "scientific_source": {"path": full.path.name, "sha256": full.sha256, "header": full.header},
         "previews": [{"path": item.path.name, "sha256": item.sha256, "header": item.header} for item in previews],
     }

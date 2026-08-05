@@ -18,6 +18,7 @@ from voxelweave import (
     request_volume_preview,
     reverse_audit_gcode,
 )
+from voxelweave.toolpath import _extrusion_and_feedrate
 
 
 def _calibration() -> Calibration:
@@ -84,3 +85,36 @@ def test_preview_resolution_does_not_change_gcode_and_package_is_deterministic(t
     assert first["hashes"] == second["hashes"]
     assert (tmp_path / "one" / "toolpath.gcode").read_bytes() == (tmp_path / "two" / "toolpath.gcode").read_bytes()
     assert first["audit"]["passed"]
+
+
+def test_volumetric_flow_cap_wins_over_minimum_speed_preference() -> None:
+    profile = PrinterProfile(
+        max_flow_mm3_s=0.01,
+        min_print_speed_mm_min=10000.0,
+        max_print_speed_mm_min=20000.0,
+        min_line_width_mm=0.01,
+        max_line_width_mm=10.0,
+    )
+    extrusion, feedrate = _extrusion_and_feedrate(10.0, 10.0, 5.0, profile, 0.01)
+    assert extrusion > 0.0
+    assert feedrate < profile.min_print_speed_mm_min
+    assert feedrate * 10.0 * 5.0 / 60.0 <= profile.max_flow_mm3_s + 1e-12
+
+
+def test_clipping_requires_acknowledgement_and_is_reported() -> None:
+    volume = create_synthetic_volume(pattern="uniform", shape_zyx=(4, 4, 4), hu_min=1200.0, hu_max=1200.0)
+    selection = create_print_selection(volume, plane="axial", mode="continuous", start_index=1, end_index=2, layer_height_mm=0.5)
+    with pytest.raises(CalibrationMismatchError, match="outside calibration range"):
+        generate_toolpath(selection, _calibration(), profile=PrinterProfile(sample_step_mm=4.0))
+    with pytest.raises(CalibrationMismatchError, match="acknowledge_calibration_clipping"):
+        generate_toolpath(selection, _calibration(), profile=PrinterProfile(sample_step_mm=4.0), allow_calibration_clipping=True)
+    generated = generate_toolpath(
+        selection,
+        _calibration(),
+        profile=PrinterProfile(sample_step_mm=4.0),
+        allow_calibration_clipping=True,
+        acknowledge_calibration_clipping=True,
+    )
+    assert generated.report["clipping"]["occurred"] is True
+    assert generated.report["clipping"]["acknowledged"] is True
+    assert generated.audit().passed

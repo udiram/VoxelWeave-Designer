@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 from threading import Event
 
 import pytest
 
+from voxelweave.engine import EngineSession
 from voxelweave.errors import CancellationError, DicomValidationError, ProtocolError
 from voxelweave.protocol import MAX_ARRAY_ITEMS, MAX_JSONL_BYTES, ControlEnvelope, Operation
 from voxelweave.sidecar import serve_jsonl
@@ -86,3 +88,13 @@ def test_sidecar_cancel_is_available_while_an_operation_is_running(monkeypatch: 
     assert by_request["cancel-request"]["payload"]["cancelled"] is True  # type: ignore[index]
     assert by_request["slow"]["ok"] is False
     assert by_request["slow"]["error"]["code"] == CancellationError.__name__  # type: ignore[index]
+
+
+def test_engine_session_context_cleans_scoped_workspace(tmp_path: Path) -> None:
+    with EngineSession(workspace=tmp_path) as session:
+        workspace = session._workspace
+        workspace.joinpath("cache", "sentinel").parent.mkdir(parents=True)
+        workspace.joinpath("cache", "sentinel").write_text("temporary", encoding="utf-8")
+        assert workspace.exists()
+    assert not workspace.exists()
+    assert tmp_path.exists()

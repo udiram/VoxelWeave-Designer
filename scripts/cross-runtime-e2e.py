@@ -158,6 +158,7 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
                 "calibration": calibration(),
                 "tool": "T0",
                 "allow_calibration_clipping": True,
+                "acknowledge_calibration_clipping": True,
                 "profile": {"printer": "Prusa XL", "sample_step_mm": 2.0},
             },
         )
@@ -193,6 +194,7 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
                 "calibration": calibration(),
                 "tool": "T0",
                 "allow_calibration_clipping": True,
+                "acknowledge_calibration_clipping": True,
                 "profile": {"printer": "Prusa XL", "sample_step_mm": 2.0},
             },
         )

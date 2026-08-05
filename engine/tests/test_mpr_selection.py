@@ -67,3 +67,31 @@ def test_continuous_tile_and_single_selection_contracts() -> None:
     single = create_print_selection(volume, plane="coronal", mode="single", plane_index=3, thickness_mm=2.0, layer_height_mm=1.0)
     assert single.selected_source_indices == (3,)
     assert single.print_size_mm[2] == 2.0
+
+
+def test_continuous_range_samples_only_selected_slab_endpoints() -> None:
+    hu = np.zeros((8, 4, 4), dtype=np.float32)
+    for z_index in range(8):
+        hu[z_index, :, :] = z_index * 1000.0
+    from voxelweave.dicom import Volume
+
+    volume = Volume(
+        hu=hu,
+        spacing_mm=(2.0, 1.0, 1.0),
+        origin_lps=np.zeros(3),
+        direction_lps=np.eye(3),
+        series_uid="synthetic-slab",
+    )
+    selection = create_print_selection(
+        volume,
+        plane="axial",
+        mode="continuous",
+        start_index=2,
+        end_index=4,
+        layer_height_mm=1.0,
+        print_size_mm=(4.0, 4.0, 6.0),
+    )
+    assert selection.sample_hu(2.0, 2.0, 0.0, method="nearest") == 2000.0
+    assert selection.sample_hu(2.0, 2.0, 6.0, method="nearest") == 4000.0
+    assert selection.manifest.source_bounds_voxel_xyz[0][2] == 2.0
+    assert selection.manifest.source_bounds_voxel_xyz[1][2] == 4.0

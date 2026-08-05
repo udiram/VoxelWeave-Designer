@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import math
+import zipfile
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -38,6 +41,8 @@ class DicomInstance:
     bits_stored: int | None
     image_type: tuple[str, ...]
     series_description: str
+    sop_instance_uid: str | None
+    rescale_parameters_present: bool
     eligible: bool
     exclusion_reason: str | None = None
 
@@ -253,14 +258,27 @@ def _frame_value(ds: Dataset, frame_index: int, sequence_name: str, attr_name: s
     return getattr(ds, attr_name, None)
 
 
-def _frame_records(path: Path, ds: Dataset) -> tuple[list[DicomInstance], np.ndarray]:
-    if "PixelData" not in ds:
-        return [], np.empty((0, 0, 0), dtype=np.float32)
-    try:
-        pixels = np.asarray(ds.pixel_array)
-    except Exception as exc:
-        raise DicomValidationError("DICOM pixel data could not be decoded for a supported CT source.") from exc
+def _frame_records(
+    source_name: str,
+    ds: Dataset,
+    *,
+    decode_pixels: bool,
+) -> tuple[list[DicomInstance], np.ndarray]:
     frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
+    rows = int(getattr(ds, "Rows", 0) or 0)
+    columns = int(getattr(ds, "Columns", 0) or 0)
+    if rows <= 0 or columns <= 0:
+        return [], np.empty((0, 0, 0), dtype=np.float32)
+    if decode_pixels:
+        if "PixelData" not in ds:
+            return [], np.empty((0, 0, 0), dtype=np.float32)
+        try:
+            pixels = np.asarray(ds.pixel_array)
+        except Exception as exc:
+            raise DicomValidationError("DICOM pixel data could not be decoded for a supported CT source.") from exc
+    else:
+        # Metadata-first inspection must never force a full-resolution decode.
+        pixels = np.empty((frames, rows, columns), dtype=np.float32)
     if frames == 1:
         pixel_frames = pixels[np.newaxis, ...] if pixels.ndim == 2 else pixels
     elif pixels.ndim >= 3 and pixels.shape[0] == frames:
@@ -303,8 +321,12 @@ def _frame_records(path: Path, ds: Dataset) -> tuple[list[DicomInstance], np.nda
         spacing = _spacing(_frame_value(ds, frame_index, "PixelMeasuresSequence", "PixelSpacing"))
         if spacing is None:
             spacing = _spacing(getattr(ds, "PixelSpacing", None))
-        slope = _safe_float(_frame_value(ds, frame_index, "PixelValueTransformationSequence", "RescaleSlope"), 1.0)
-        intercept = _safe_float(_frame_value(ds, frame_index, "PixelValueTransformationSequence", "RescaleIntercept"), 0.0)
+        slope_value = _frame_value(ds, frame_index, "PixelValueTransformationSequence", "RescaleSlope")
+        intercept_value = _frame_value(ds, frame_index, "PixelValueTransformationSequence", "RescaleIntercept")
+        slope_present = slope_value is not None or hasattr(ds, "RescaleSlope")
+        intercept_present = intercept_value is not None or hasattr(ds, "RescaleIntercept")
+        slope = _safe_float(slope_value, 1.0)
+        intercept = _safe_float(intercept_value, 0.0)
         image_type = _image_type(ds)
         searchable = " ".join((*image_type, _text(getattr(ds, "SeriesDescription", "")), _text(getattr(ds, "ProtocolName", "")))).upper()
         modality = _text(getattr(ds, "Modality", "")).upper()
@@ -321,9 +343,11 @@ def _frame_records(path: Path, ds: Dataset) -> tuple[list[DicomInstance], np.nda
             reason = "missing_image_orientation_patient"
         elif spacing is None:
             reason = "missing_pixel_spacing"
+        elif not slope_present or not intercept_present:
+            reason = "missing_rescale_parameters"
         records.append(
             DicomInstance(
-                source_name="source-object",
+                source_name=source_name,
                 frame_index=frame_index,
                 series_uid=_text(getattr(ds, "SeriesInstanceUID", "")) or "MISSING_SERIES",
                 modality=modality,
@@ -338,6 +362,12 @@ def _frame_records(path: Path, ds: Dataset) -> tuple[list[DicomInstance], np.nda
                 bits_stored=int(getattr(ds, "BitsStored", 0)) if hasattr(ds, "BitsStored") else None,
                 image_type=image_type,
                 series_description=_text(getattr(ds, "SeriesDescription", "")),
+                sop_instance_uid=(
+                    _text(getattr(ds, "SOPInstanceUID", ""))
+                    or _text(getattr(getattr(ds, "file_meta", None), "MediaStorageSOPInstanceUID", ""))
+                    or None
+                ),
+                rescale_parameters_present=bool(slope_present and intercept_present),
                 eligible=reason is None,
                 exclusion_reason=reason,
             )
@@ -345,14 +375,20 @@ def _frame_records(path: Path, ds: Dataset) -> tuple[list[DicomInstance], np.nda
     return records, np.asarray(pixel_frames)
 
 
-def _read_candidate(path: Path) -> tuple[list[DicomInstance], np.ndarray, Dataset] | None:
+def _read_candidate(source: tuple[str, Path | bytes], *, decode_pixels: bool) -> tuple[list[DicomInstance], np.ndarray, Dataset] | None:
+    source_name, payload = source
     try:
-        ds = pydicom.dcmread(str(path), stop_before_pixels=False, force=True)
-    except Exception:
+        if isinstance(payload, bytes):
+            ds = pydicom.dcmread(io.BytesIO(payload), stop_before_pixels=not decode_pixels, force=True)
+        else:
+            ds = pydicom.dcmread(str(payload), stop_before_pixels=not decode_pixels, force=True)
+    except Exception as exc:
+        if decode_pixels:
+            raise DicomValidationError("DICOM metadata or pixel payload could not be decoded.") from exc
         return None
-    if "PixelData" not in ds:
+    if decode_pixels and "PixelData" not in ds:
         return None
-    records, pixels = _frame_records(path, ds)
+    records, pixels = _frame_records(source_name, ds, decode_pixels=decode_pixels)
     return records, pixels, ds
 
 
@@ -365,11 +401,64 @@ def _candidate_paths(source: str | Path) -> list[Path]:
     return sorted(item for item in root.rglob("*") if item.is_file())
 
 
-def _collect(source: str | Path) -> tuple[dict[str, list[tuple[DicomInstance, np.ndarray, Dataset]]], int]:
+def _candidate_sources(source: str | Path | Sequence[str | Path]) -> list[tuple[str, Path | bytes]]:
+    """Expand directory, ZIP, or explicit-file sources into PHI-safe inputs."""
+
+    if isinstance(source, (str, Path)):
+        requested: list[str | Path] = [source]
+    else:
+        requested = list(source)
+    entries: list[tuple[str, Path | bytes]] = []
+    paths: list[Path] = []
+    for value in requested:
+        path = Path(value)
+        if not path.exists():
+            raise DicomValidationError("DICOM source path does not exist.")
+        if path.is_dir():
+            paths.extend(sorted(item for item in path.rglob("*") if item.is_file()))
+        elif path.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    for name in sorted(item for item in archive.namelist() if not item.endswith("/")):
+                        try:
+                            entries.append((f"source-{len(entries) + 1:06d}", archive.read(name)))
+                        except (KeyError, RuntimeError, zipfile.BadZipFile):
+                            continue
+            except zipfile.BadZipFile as exc:
+                raise DicomValidationError("DICOM ZIP source is not a readable archive.") from exc
+        else:
+            paths.append(path)
+    for path in sorted(paths, key=lambda item: str(item)):
+        entries.append((f"source-{len(entries) + 1:06d}", path))
+    return entries
+
+
+def _source_file_hashes(source: str | Path | Sequence[str | Path]) -> tuple[str, ...]:
+    """Return deterministic payload hashes without exposing source paths."""
+
+    hashes: list[str] = []
+    for _, payload in _candidate_sources(source):
+        data = payload if isinstance(payload, bytes) else payload.read_bytes()
+        hashes.append(hashlib.sha256(data).hexdigest())
+    return tuple(sorted(hashes))
+
+
+def _collect(
+    source: str | Path | Sequence[str | Path],
+    *,
+    decode_pixels: bool,
+    series_uid: str | None = None,
+) -> tuple[dict[str, list[tuple[DicomInstance, np.ndarray, Dataset]]], int]:
     groups: dict[str, list[tuple[DicomInstance, np.ndarray, Dataset]]] = defaultdict(list)
     excluded = 0
-    for path in _candidate_paths(source):
-        candidate = _read_candidate(path)
+    for source_entry in _candidate_sources(source):
+        metadata_candidate = _read_candidate(source_entry, decode_pixels=False)
+        if metadata_candidate is None:
+            continue
+        metadata_records, _, _ = metadata_candidate
+        if series_uid is not None and not any(record.series_uid == series_uid for record in metadata_records):
+            continue
+        candidate = _read_candidate(source_entry, decode_pixels=decode_pixels)
         if candidate is None:
             continue
         records, pixels, ds = candidate
@@ -399,6 +488,9 @@ def _orientation_geometry(records: Sequence[DicomInstance]) -> dict[str, Any] | 
     drift = float(math.hypot(float(np.ptp(deltas @ row)), float(np.ptp(deltas @ col))))
     diffs = np.diff(projections)
     dz = float(np.median(diffs)) if diffs.size else None
+    irregular = bool(diffs.size and (np.any(diffs <= 1e-4) or (dz is not None and np.max(np.abs(diffs - dz)) > 0.1)))
+    sop_keys = [(item.sop_instance_uid, item.frame_index) for item in records]
+    duplicate_sop_count = len(sop_keys) - len(set(sop_keys))
     return {
         "row_cosines": [float(item) for item in row],
         "column_cosines": [float(item) for item in col],
@@ -407,10 +499,13 @@ def _orientation_geometry(records: Sequence[DicomInstance]) -> dict[str, Any] | 
         "column_norm": float(col_norm),
         "row_column_dot": orthogonality,
         "duplicate_position_count": int(np.count_nonzero(np.abs(diffs) <= 1e-4)),
+        "duplicate_sop_count": int(max(0, duplicate_sop_count)),
         "slice_position_count": int(len(projections)),
         "median_projected_spacing_mm": dz,
         "min_projected_spacing_mm": float(np.min(diffs)) if diffs.size else None,
         "max_projected_spacing_mm": float(np.max(diffs)) if diffs.size else None,
+        "irregular_spacing_detected": irregular,
+        "slice_gap_detected": bool(diffs.size and np.max(diffs) > float(dz) * 1.5) if dz is not None else False,
         "in_plane_drift_mm": drift,
         "gantry_tilt_detected": bool(drift > 0.25),
         "axis_aligned": bool(max(np.max(np.abs(row)), np.max(np.abs(col)), np.max(np.abs(normal))) >= 0.999),
@@ -418,7 +513,7 @@ def _orientation_geometry(records: Sequence[DicomInstance]) -> dict[str, Any] | 
 
 
 def inspect_dicom_source(
-    source: str | Path,
+    source: str | Path | Sequence[str | Path],
     *,
     request_id: str = "inspection",
     progress: ProgressCallback | None = None,
@@ -426,15 +521,15 @@ def inspect_dicom_source(
 ) -> DicomInspection:
     """Inspect all candidate images without exposing patient tags in the report."""
 
-    paths = _candidate_paths(source)
+    candidates = _candidate_sources(source)
     groups: dict[str, list[DicomInstance]] = defaultdict(list)
     excluded = 0
     warnings: list[str] = []
-    total = max(1, len(paths))
-    for index, path in enumerate(paths, start=1):
+    total = max(1, len(candidates))
+    for index, candidate_source in enumerate(candidates, start=1):
         if cancellation:
             cancellation.checkpoint()
-        candidate = _read_candidate(path)
+        candidate = _read_candidate(candidate_source, decode_pixels=False)
         if candidate is not None:
             records, _, _ = candidate
             for record in records:
@@ -449,13 +544,21 @@ def inspect_dicom_source(
     for series_uid in sorted(groups):
         records = groups[series_uid]
         geometry = _orientation_geometry(records)
-        geometry_invalid = bool(geometry and (geometry.get("gantry_tilt_detected") or geometry.get("duplicate_position_count", 0) > 0))
+        geometry_invalid = bool(
+            geometry
+            and (
+                geometry.get("gantry_tilt_detected")
+                or geometry.get("duplicate_position_count", 0) > 0
+                or geometry.get("duplicate_sop_count", 0) > 0
+                or geometry.get("irregular_spacing_detected")
+            )
+        )
         eligible = all(item.eligible for item in records) and len(records) >= 2 and not geometry_invalid
         reason = None if eligible else next((item.exclusion_reason for item in records if item.exclusion_reason), None)
         if reason is None and len(records) < 2:
             reason = "series_requires_at_least_two_slices"
         if reason is None and geometry_invalid:
-            reason = "unsupported_gantry_tilt_or_duplicate_positions"
+            reason = "unsupported_gantry_tilt_duplicate_or_irregular_spacing"
         summaries.append(
             DicomSeriesSummary(
                 series_uid=series_uid,
@@ -464,18 +567,30 @@ def inspect_dicom_source(
                 eligible=eligible,
                 exclusion_reason=reason,
                 orientation=geometry,
-                spacing={"pixel_spacing": list(records[0].pixel_spacing or ())} if records else None,
+                spacing=(
+                    {
+                        "pixel_spacing": list(records[0].pixel_spacing or ()),
+                        "slice_spacing_mm": geometry.get("median_projected_spacing_mm") if geometry else None,
+                    }
+                    if records
+                    else None
+                ),
                 source_names=tuple(sorted({item.source_name for item in records})),
                 multiframe=any(item.frame_index > 0 for item in records),
             )
         )
     if not summaries:
         raise DicomValidationError("No pixel-bearing DICOM objects were found in the source.")
+    if excluded:
+        warnings.append(f"{excluded} DICOM frame(s) were excluded by modality, localizer, geometry, or metadata validation.")
+    eligible_count = sum(1 for item in summaries if item.eligible)
+    if eligible_count > 1:
+        warnings.append("Multiple eligible CT series are available; explicit series selection is recommended.")
     return DicomInspection("<dicom-source>", tuple(summaries), excluded, tuple(warnings))
 
 
 def select_dicom_series(
-    source_or_inspection: str | Path | DicomInspection,
+    source_or_inspection: str | Path | Sequence[str | Path] | DicomInspection,
     *,
     series_uid: str | None = None,
 ) -> DicomSeriesSummary:
@@ -495,6 +610,16 @@ def _validate_records(records: list[tuple[DicomInstance, np.ndarray, Dataset]], 
     if len(records) < 2:
         raise DicomValidationError("A complete CT source requires at least two image positions.")
     instances = [item[0] for item in records]
+    seen_sop_frames: set[tuple[str, int]] = set()
+    for item in instances:
+        if item.sop_instance_uid is None:
+            raise DicomValidationError("CT source is missing SOPInstanceUID on one or more frames.")
+        key = (item.sop_instance_uid, item.frame_index)
+        if key in seen_sop_frames:
+            raise DicomValidationError("CT source contains duplicate SOP instances or duplicate multiframe frames.")
+        seen_sop_frames.add(key)
+        if not item.rescale_parameters_present:
+            raise DicomValidationError("CT source is missing RescaleSlope or RescaleIntercept.")
     if any(item.position_lps is None for item in instances):
         raise DicomValidationError("CT source is missing ImagePositionPatient on one or more frames.")
     if any(item.orientation is None for item in instances):
@@ -539,6 +664,8 @@ def _validate_records(records: list[tuple[DicomInstance, np.ndarray, Dataset]], 
         "median_projected_spacing_mm": dz,
         "in_plane_drift_mm": in_plane_drift,
         "gantry_tilt_detected": bool(in_plane_drift > gantry_tilt_tolerance_mm),
+        "slice_gap_detected": bool(np.max(diffs) > dz * 1.5) if diffs.size else False,
+        "irregular_spacing_detected": bool(np.max(np.abs(diffs - dz)) > 0.1) if diffs.size else False,
     }
     if in_plane_drift > gantry_tilt_tolerance_mm:
         raise DicomValidationError("CT source has gantry tilt or in-plane slice drift; resample it before generation.")
@@ -546,7 +673,7 @@ def _validate_records(records: list[tuple[DicomInstance, np.ndarray, Dataset]], 
 
 
 def load_dicom_series(
-    source: str | Path,
+    source: str | Path | Sequence[str | Path],
     *,
     series_uid: str | None = None,
     gantry_tilt_tolerance_mm: float = 0.25,
@@ -556,12 +683,18 @@ def load_dicom_series(
 ) -> Volume:
     """Load one validated series into the full-resolution signed-HU scientific source."""
 
-    groups, _ = _collect(source)
-    eligible_groups = {uid: items for uid, items in groups.items() if all(item[0].eligible for item in items)}
+    metadata_groups, _ = _collect(source, decode_pixels=False)
+    eligible_metadata = {uid: items for uid, items in metadata_groups.items() if all(item[0].eligible for item in items)}
     if series_uid is None:
-        if not eligible_groups:
+        if not eligible_metadata:
             raise DicomValidationError("No eligible CT series is available after DICOM filtering.")
-        series_uid = sorted(eligible_groups, key=lambda uid: (-len(eligible_groups[uid]), uid))[0]
+        series_uid = sorted(eligible_metadata, key=lambda uid: (-len(eligible_metadata[uid]), uid))[0]
+    if series_uid not in eligible_metadata:
+        raise DicomValidationError("Requested SeriesInstanceUID is not an eligible CT series.")
+    # Decode only the explicitly selected eligible series.  Localizers, dose
+    # reports, and competing series remain metadata-only.
+    groups, _ = _collect(source, decode_pixels=True, series_uid=series_uid)
+    eligible_groups = {uid: items for uid, items in groups.items() if all(item[0].eligible for item in items)}
     if series_uid not in eligible_groups:
         raise DicomValidationError("Requested SeriesInstanceUID is not an eligible CT series.")
     records, geometry = _validate_records(eligible_groups[series_uid], gantry_tilt_tolerance_mm=gantry_tilt_tolerance_mm)
@@ -599,6 +732,7 @@ def load_dicom_series(
             "bits_stored_values": sorted({item.bits_stored for item, _, _ in records}),
             "rescale_slope_range": [min(item.slope for item, _, _ in records), max(item.slope for item, _, _ in records)],
             "rescale_intercept_range": [min(item.intercept for item, _, _ in records), max(item.intercept for item, _, _ in records)],
+            "source_file_hashes": list(_source_file_hashes(source)),
             "source_dicom_identifiers": "redacted_from_logs",
         },
     )

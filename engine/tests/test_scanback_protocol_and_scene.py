@@ -32,3 +32,22 @@ def test_protocol_operations_are_versioned_and_scene_is_fail_closed() -> None:
     scene_result = session.handle(ControlEnvelope("scene", Operation.VALIDATE_SCENE, {"scene": {"regions": [{"id": "x", "owner": "T0", "ambiguous_overlap": True}]}}))
     assert not scene_result["passed"]
     assert validate_scene({"regions": []})["warnings"]
+
+
+def test_scene_mesh_and_boolean_require_canonical_geometry_validation() -> None:
+    malformed_mesh = validate_scene(
+        {
+            "regions": [
+                {
+                    "id": "mesh",
+                    "owner": "T0:measurement",
+                    "geometry": {"kind": "imported_mesh", "vertices": [[0.0, 0.0]], "faces": [[0, 1, 2]]},
+                }
+            ]
+        }
+    )
+    assert not malformed_mesh["passed"]
+    primitive = validate_scene(
+        {"regions": [{"id": "box", "owner": "T0:fixture", "geometry": {"kind": "box", "dimensions": [2, 3, 4]}}]}
+    )
+    assert primitive["passed"]

@@ -101,6 +101,9 @@ def serve_jsonl(input_stream: TextIO, output_stream: TextIO) -> None:
 
     for worker in workers:
         worker.join()
+    close = getattr(session, "close", None)
+    if callable(close):
+        close()
 
 
 def main() -> None:

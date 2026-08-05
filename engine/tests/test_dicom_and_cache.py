@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -102,3 +103,29 @@ def test_progress_has_request_identity_and_cancellation_is_cooperative(tmp_path:
     token.cancel()
     with pytest.raises(CancellationError):
         inspect_dicom_source(source_dir, cancellation=token)
+
+
+def test_zip_and_explicit_file_sources_and_metadata_first_inspection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_dir = tmp_path / "zip-source"
+    files = write_synthetic_dicom_series(source_dir, shape_zyx=(3, 4, 4))
+    archive = tmp_path / "series.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        for path in files:
+            handle.write(path, arcname=path.name)
+
+    import pydicom
+
+    calls: list[bool] = []
+    original = pydicom.dcmread
+
+    def recording_dcmread(*args: object, **kwargs: object) -> object:
+        calls.append(bool(kwargs.get("stop_before_pixels")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pydicom, "dcmread", recording_dcmread)
+    inspection = inspect_dicom_source(archive)
+    assert inspection.eligible_series
+    assert calls and all(calls)
+    loaded = load_dicom_series([files[0], files[1], files[2]])
+    assert loaded.shape_zyx == (3, 4, 4)
+    assert any(not value for value in calls)
