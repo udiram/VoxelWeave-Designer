@@ -4,11 +4,11 @@ VoxelWeave Designer is local-first. The desktop workflow keeps scientific source
 
 ## Default behavior
 
-- Raw identifiable DICOM is not embedded in a `.voxelweave` document by default. The document stores authorized source references, derived cache identity, transforms, selections, calibration references, evidence references, and hashes.
+- Raw identifiable DICOM and imported STL/3MF topology are not embedded in a `.voxelweave` document by default. The document stores source references, derived cache identity, transforms, selections, calibration references, evidence references, and hashes. Reopening a document requires an explicit per-session confirmation before referenced local paths are reauthorized.
 - Full-resolution signed HU data remains in the Python engine and binary cache. Display pyramids, MPR textures, and WebGL textures are previews, not alternate scientific sources.
 - Normal logs and release evidence redact patient fields. Use a non-identifying run label for exported reports.
 - The application does not transmit telemetry to a vendor or analytics endpoint by default. Performance diagnostics are local and user-exportable.
-- Optional Prusa Connect upload is an explicit authenticated operator action. Credentials belong in the macOS Keychain, not in a project or browser store.
+- This release performs no printer-service upload and stores no printer-service credentials.
 
 ## Operator responsibilities
 

@@ -355,7 +355,7 @@ async function probeCapabilities(page) {
       const extension = gl.getExtension("WEBGL_debug_renderer_info");
       if (extension) renderer = gl.getParameter(extension.UNMASKED_RENDERER_WEBGL);
     }
-    return {
+    const result = {
       probeMs: performance.now() - started,
       webgl2Supported: Boolean(gl),
       webgl2Renderer: renderer,
@@ -367,6 +367,8 @@ async function probeCapabilities(page) {
       nativeWebKitMeasured: false,
       instrumentsMeasured: false,
     };
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    return result;
   });
 }
 
@@ -441,6 +443,9 @@ async function main() {
       webgl2_probe_ms: aggregate(iterations.map((item) => item.capabilities.probeMs), budget.metrics.webgl2_probe_ms),
     };
     const failures = allGateFailures(metrics);
+    const contextLifecycleWarnings = browserLogs.filter((entry) => /Too many active WebGL contexts/.test(entry));
+    const contextCleanupEvents = browserLogs.filter((entry) => /THREE\.WebGLRenderer: Context Lost/.test(entry));
+    if (contextLifecycleWarnings.length) failures.push(`webgl context lifecycle: observed ${contextLifecycleWarnings.length} context-exhaustion warning(s)`);
     if (!capabilities.webgl2Supported) failures.push("webgl2: Chromium could not create a WebGL2 context");
     if (!designRenderer.qualifies) failures.push("design renderer: expected data-voxelweave-renderer=three-r3f with a child WebGL2 canvas");
     if (!toolpathRenderer.qualifies) failures.push("toolpath renderer: expected data-voxelweave-renderer=three-r3f with a child WebGL2 canvas");
@@ -456,6 +461,8 @@ async function main() {
         chromiumWebgl2: capabilities,
         design: designRenderer,
         toolpath: toolpathRenderer,
+        contextLifecycleWarnings,
+        contextCleanupEvents,
         nativeWebKitMeasured: false,
         instrumentsMeasured: false,
         limitation: "The gate requires explicit three-r3f markers and a child WebGL2 canvas on Design and Toolpath roots. It records Chromium WebGL2 evidence but does not claim native WebKit or Instruments qualification.",

@@ -63,6 +63,7 @@ class SelectionManifest:
     print_size_mm: Vec3
     layer_height_mm: float
     source_to_print_transform: tuple[tuple[float, ...], ...]
+    tile_source_to_print_transforms: tuple[dict[str, Any], ...]
     resampling: str
     plate_layout: dict[str, Any]
     structural_regions: tuple[dict[str, Any], ...]
@@ -82,6 +83,7 @@ class SelectionManifest:
             "print_size_mm": list(self.print_size_mm),
             "layer_height_mm": self.layer_height_mm,
             "source_to_print_transform": [list(row) for row in self.source_to_print_transform],
+            "tile_source_to_print_transforms": [canonicalize(item) for item in self.tile_source_to_print_transforms],
             "resampling": self.resampling,
             "plate_layout": canonicalize(self.plate_layout),
             "structural_regions": [canonicalize(item) for item in self.structural_regions],
@@ -286,6 +288,16 @@ def create_print_selection(
         tile_size = tuple(float(item) for item in raw_tile_size)
         if any(item <= 0 or not math.isfinite(item) for item in tile_size):
             raise GeometryValidationError("Tile plate tile_size_mm must contain positive finite dimensions.")
+        if plate.get("tile_thickness_mm") is not None:
+            try:
+                plate_thickness = float(plate["tile_thickness_mm"])
+            except (TypeError, ValueError):
+                raise GeometryValidationError("Tile plate thickness must be numeric.") from None
+            if not math.isfinite(plate_thickness) or plate_thickness <= 0:
+                raise GeometryValidationError("Tile plate thickness must be finite and positive.")
+            if abs(plate_thickness - depth_mm) > 1e-6 or abs(plate_thickness - requested_size[2]) > 1e-6:
+                raise GeometryValidationError("Tile thickness must agree across thickness_mm, print_size_mm, and plate_layout.")
+            plate["tile_thickness_mm"] = plate_thickness
         plate["columns"] = columns
         plate["rows"] = rows
         plate["tile_spacing_mm"] = list(spacing)
@@ -333,10 +345,27 @@ def create_print_selection(
     structural = tuple(generated_structural + provided_structural)
     sample_low = low.copy()
     sample_high = high.copy()
-    if mode == "continuous":
-        sample_low[normal_axis] = float(selected_indices[0])
-        sample_high[normal_axis] = float(selected_indices[-1])
-    transform = _transform_for_selection(volume, plane, sample_low, sample_high, requested_size)
+    sample_low[normal_axis] = float(selected_indices[0])
+    sample_high[normal_axis] = float(selected_indices[-1] if mode in {"continuous", "tile"} else selected_indices[0])
+    transform_low = sample_low.copy()
+    transform_high = sample_high.copy()
+    if mode == "tile":
+        transform_high[normal_axis] = transform_low[normal_axis]
+    transform = _transform_for_selection(volume, plane, transform_low, transform_high, requested_size)
+    tile_transforms = tuple(
+        {
+            "tile_index": tile_index,
+            "source_index": source_index,
+            "matrix": _transform_for_selection(
+                volume,
+                plane,
+                np.where(np.arange(3) == normal_axis, float(source_index), low),
+                np.where(np.arange(3) == normal_axis, float(source_index), high),
+                requested_size,
+            ),
+        }
+        for tile_index, source_index in enumerate(selected_indices)
+    ) if mode == "tile" else ()
     crop_min = cast(Vec3, tuple(float(item) for item in volume.voxel_to_lps(tuple(float(value) for value in low))))
     crop_max = cast(Vec3, tuple(float(item) for item in volume.voxel_to_lps(tuple(float(value) for value in high))))
     manifest = SelectionManifest(
@@ -352,6 +381,7 @@ def create_print_selection(
         print_size_mm=requested_size,
         layer_height_mm=float(layer_height_mm),
         source_to_print_transform=transform,
+        tile_source_to_print_transforms=tile_transforms,
         resampling=resampling or ("full_resolution_signed_hu_at_printer_layer_centers" if mode == "continuous" else "full_resolution_signed_hu_plane_sampling"),
         plate_layout=plate,
         structural_regions=structural,

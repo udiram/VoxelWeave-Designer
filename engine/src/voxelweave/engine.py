@@ -17,7 +17,8 @@ import numpy as np
 from .binary import write_binary_array
 from .calibration import Calibration, CalibrationSet
 from .dicom import DicomInspection, Volume, inspect_dicom_source, load_dicom_series, select_dicom_series
-from .errors import EngineError, GeometryValidationError, ProtocolError
+from .errors import CalibrationMismatchError, EngineError, GeometryValidationError, ProtocolError
+from .mesh import load_mesh_file
 from .models import CancellationToken, ProgressCallback
 from .mpr import (
     build_volume_cache,
@@ -27,7 +28,8 @@ from .mpr import (
     sample_voxel,
 )
 from .protocol import ControlEnvelope, Operation
-from .scanback import verify_scan_back
+from .scanback import ScanBackVerification, export_verification_package, verify_scan_back
+from .scene import ModeledPrintSelection, canonical_scene
 from .selection import create_print_selection
 from .synthetic import synthetic_scan_back, write_synthetic_dicom_series
 from .toolpath import PrinterProfile, export_run_package, generate_toolpath, reverse_audit_gcode
@@ -90,6 +92,7 @@ class EngineSession:
     volume: Volume | None = None
     selection: Any | None = None
     generated: Any | None = None
+    verification: ScanBackVerification | None = None
     _cancellations: dict[str, CancellationToken] = field(default_factory=dict)
     _cancellation_lock: Lock = field(default_factory=Lock)
     workspace: str | Path | None = None
@@ -223,6 +226,10 @@ class EngineSession:
         try:
             op = envelope.operation
             if op == Operation.INSPECT_DICOM_SOURCE:
+                self.volume = None
+                self.selection = None
+                self.generated = None
+                self.verification = None
                 self.source = self._resolve_source_payload(payload)
                 self.inspection = inspect_dicom_source(self.source, request_id=envelope.request_id, cancellation=token, progress=callback)
                 return self.inspection.to_dict()
@@ -230,10 +237,16 @@ class EngineSession:
                 source = self._resolve_source_payload(payload) if payload.get("source") is not None or payload.get("sources") is not None else self.source
                 if source is None:
                     raise EngineError("Select a DICOM source before selecting a series.")
+                source_changed = source != self.source
                 inspection = self.inspection if source == self.source and self.inspection is not None else inspect_dicom_source(source, request_id=envelope.request_id, cancellation=token, progress=callback)
                 summary = select_dicom_series(inspection, series_uid=payload.get("series_uid"))
-                if self.volume is None or self.volume.series_uid != summary.series_uid:
+                if source_changed or self.volume is None or self.volume.series_uid != summary.series_uid:
                     self.volume = load_dicom_series(source, series_uid=summary.series_uid, request_id=envelope.request_id, cancellation=token, progress=callback)
+                    self.source = source
+                    self.inspection = inspection
+                    self.selection = None
+                    self.generated = None
+                    self.verification = None
                 return summary.to_dict()
             if op == Operation.BUILD_VOLUME_CACHE:
                 result = build_volume_cache(self._require_volume(), self._workspace_path(payload.get("directory"), "cache"), request_id=envelope.request_id, cancellation=token, progress=callback)
@@ -273,14 +286,16 @@ class EngineSession:
                 return calculate_histogram(self._require_volume(), bins=int(payload.get("bins", 256)))
             if op == Operation.CREATE_PRINT_SELECTION:
                 self.selection = create_print_selection(self._require_volume(), **_normalize_create_selection_payload(self, payload))
+                self.generated = None
+                self.verification = None
                 return self.selection.manifest.to_dict()
             if op == Operation.VALIDATE_SCENE:
                 return validate_scene(payload.get("scene", payload))
             if op == Operation.GENERATE_TOOLPATH:
-                if self.selection is None:
-                    raise EngineError("Create a print selection before generating a toolpath.")
-                if payload.get("scene") is not None:
-                    scene_result = validate_scene(payload.get("scene", {}))
+                self.generated = None
+                scene_payload = payload.get("scene") if isinstance(payload.get("scene"), Mapping) else None
+                if scene_payload is not None:
+                    scene_result = validate_scene(scene_payload)
                     if not scene_result["passed"]:
                         raise GeometryValidationError("Scene canonical geometry validation failed: " + "; ".join(scene_result["errors"]))
                 calibration_value = payload.get("calibrations", payload.get("calibration"))
@@ -293,12 +308,30 @@ class EngineSession:
                     calibration = cast(dict[str, Calibration], {str(key): Calibration.from_dict(dict(value)) for key, value in calibration_value.items()})
                 else:
                     calibration = Calibration.from_dict(dict(calibration_value))
+                generation_source = str(payload.get("generation_source", "dicom_selection" if self.selection is not None else "modeled_scene"))
+                if generation_source not in {"dicom_selection", "modeled_scene"}:
+                    raise ProtocolError("generation_source must be dicom_selection or modeled_scene.")
+                selection = None if generation_source == "modeled_scene" else self.selection
+                if selection is None:
+                    if generation_source == "dicom_selection":
+                        raise EngineError("Create a DICOM print selection before DICOM-backed toolpath generation.")
+                    if scene_payload is None:
+                        raise EngineError("Create a print selection or provide a visible modeled solid before generating a toolpath.")
+                    calibration_values = (
+                        calibration.calibrations if isinstance(calibration, CalibrationSet)
+                        else tuple(calibration.values()) if isinstance(calibration, Mapping)
+                        else (calibration,)
+                    )
+                    heights = {round(item.binding.layer_height_mm, 9) for item in calibration_values}
+                    if len(heights) != 1:
+                        raise CalibrationMismatchError("Modeled-only generation requires one common layer height across accepted tool calibrations.")
+                    selection = ModeledPrintSelection(canonical_scene(dict(scene_payload)), next(iter(heights)))
                 self.generated = generate_toolpath(
-                    self.selection,
+                    selection,
                     calibration,
                     profile=PrinterProfile(**dict(payload.get("profile", {}))),
                     tool=(str(payload["tool"]) if payload.get("tool") is not None else None),
-                    scene=(payload.get("scene") if isinstance(payload.get("scene"), Mapping) else None),
+                    scene=scene_payload,
                     allow_calibration_clipping=bool(payload.get("allow_calibration_clipping", False)),
                     acknowledge_calibration_clipping=bool(payload.get("acknowledge_calibration_clipping", False)),
                     request_id=envelope.request_id,
@@ -318,9 +351,10 @@ class EngineSession:
                     raise EngineError("Generate and audit a toolpath before exporting its run package.")
                 return export_run_package(self.generated, self._workspace_path(payload.get("directory"), "run-package"))
             if op == Operation.VERIFY_SCAN_BACK:
+                self.verification = None
                 scan_back_source = self._resolve_source(str(payload["scan_back_source"]))
                 scan_back = load_dicom_series(scan_back_source, series_uid=payload.get("series_uid"), request_id=envelope.request_id, cancellation=token, progress=callback)
-                verification = verify_scan_back(
+                self.verification = verify_scan_back(
                     self._require_volume(),
                     scan_back,
                     registration_method=str(payload.get("registration_method", "identity")),
@@ -329,7 +363,25 @@ class EngineSession:
                     hu_gamma_tolerance_hu=float(payload.get("hu_gamma_tolerance_hu", 40.0)),
                     expected_source_hash=payload.get("expected_source_hash"),
                 )
-                return verification.to_dict()
+                return self.verification.to_dict()
+            if op == Operation.EXPORT_VERIFICATION_REPORT:
+                if self.verification is None:
+                    raise EngineError("Verify registered scan-back evidence before exporting a verification report.")
+                if self.generated is None or not self.generated.audit().passed:
+                    raise EngineError("Generate and reverse-audit the run before exporting its verification report.")
+                selection = self.generated.selection
+                transform = {
+                    "schema": "voxelweave.source-to-print-transform.v2",
+                    "matrix": selection.manifest.source_to_print_transform,
+                    "tile_matrices": getattr(selection.manifest, "tile_source_to_print_transforms", ()),
+                }
+                return export_verification_package(
+                    self.verification,
+                    self._workspace_path(payload.get("directory"), "verification-report"),
+                    run_id=(str(payload["run_id"]) if payload.get("run_id") is not None else None),
+                    gcode_sha256=self.generated.gcode_sha256,
+                    source_to_print_transform=transform,
+                )
             raise ProtocolError(f"Unsupported operation: {op.value}")
         finally:
             with self._cancellation_lock:
@@ -373,47 +425,70 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
             return False
         return True
 
-    def validate_mesh(region_id: str, geometry: Mapping[str, Any]) -> None:
+    def validate_mesh(region_id: str, region: Mapping[str, Any], geometry: Mapping[str, Any]) -> None:
         vertices = geometry.get("vertices")
         faces = geometry.get("faces")
-        if not isinstance(vertices, list) or not isinstance(faces, list):
-            errors.append(f"Scene region {region_id} imported mesh requires vertices and faces for topology validation.")
-            return
-        if len(vertices) < 4 or not all(isinstance(item, (list, tuple)) and len(item) == 3 for item in vertices):
-            errors.append(f"Scene region {region_id} imported mesh has invalid vertex topology.")
-            return
-        if not faces or not all(isinstance(item, (list, tuple)) and len(item) >= 3 for item in faces):
-            errors.append(f"Scene region {region_id} imported mesh has invalid face topology.")
-            return
-        try:
-            vertex_array = np.asarray(vertices, dtype=np.float64)
-            face_array = np.asarray(faces, dtype=np.int64)
-        except (TypeError, ValueError):
-            errors.append(f"Scene region {region_id} imported mesh contains non-numeric topology.")
-            return
-        if not np.all(np.isfinite(vertex_array)) or np.any(face_array < 0) or np.any(face_array >= len(vertices)):
-            errors.append(f"Scene region {region_id} imported mesh contains invalid coordinates or face indices.")
-            return
+        if isinstance(vertices, list) and isinstance(faces, list):
+            if len(vertices) < 4 or not all(isinstance(item, (list, tuple)) and len(item) == 3 for item in vertices):
+                errors.append(f"Scene region {region_id} imported mesh has invalid vertex topology.")
+                return
+            if not faces or not all(isinstance(item, (list, tuple)) and len(item) >= 3 for item in faces):
+                errors.append(f"Scene region {region_id} imported mesh has invalid face topology.")
+                return
+            if any(isinstance(item, bool) or not isinstance(item, (int, np.integer)) for face in faces for item in face):
+                errors.append(f"Scene region {region_id} imported mesh face indices must be integers.")
+                return
+            try:
+                vertex_array = np.asarray(vertices, dtype=np.float64)
+                face_array = np.asarray(faces, dtype=np.int64)
+            except (TypeError, ValueError):
+                errors.append(f"Scene region {region_id} imported mesh contains non-numeric topology.")
+                return
+            if not np.all(np.isfinite(vertex_array)) or np.any(face_array < 0) or np.any(face_array >= len(vertices)):
+                errors.append(f"Scene region {region_id} imported mesh contains invalid coordinates or face indices.")
+                return
+            triangles = []
+            for face_value in faces:
+                face = [int(item) for item in face_value]
+                for index in range(1, len(face) - 1):
+                    triangles.append((face[0], face[index], face[index + 1]))
+            triangle_array = np.asarray(triangles, dtype=np.uint32)
+        else:
+            try:
+                loaded = load_mesh_file(region.get("source_path") or geometry.get("source_path"))
+            except GeometryValidationError as exc:
+                errors.append(f"Scene region {region_id} {exc}")
+                return
+            vertex_array = loaded.vertices.astype(np.float64)
+            triangle_array = loaded.triangles
         if not manifold_available:
             errors.append(f"Scene region {region_id} requires canonical manifold3d validation; {manifold_error}.")
             return
         try:  # manifold3d's constructor performs duplicate/non-manifold checks.
-            triangles = []
-            for face_value in faces:
-                face = [int(cast(Any, item)) for item in cast(list[object], face_value)]
-                for index in range(1, len(face) - 1):
-                    triangles.append((face[0], face[index], face[index + 1]))
-            Mesh(vert=vertex_array, tri=np.asarray(triangles, dtype=np.int32))
-            # Constructing a Manifold also validates the resulting mesh.
-            Manifold(Mesh(vert=vertex_array, tri=np.asarray(triangles, dtype=np.int32)))
+            manifold = Manifold(Mesh(vert_properties=vertex_array.astype(np.float32), tri_verts=triangle_array))
+            if manifold.volume() < 0:
+                manifold = Manifold(Mesh(vert_properties=vertex_array.astype(np.float32), tri_verts=triangle_array[:, ::-1].copy()))
+            if manifold.is_empty() or str(manifold.status()) != "Error.NoError" or manifold.volume() <= 0:
+                errors.append(f"Scene region {region_id} imported mesh must be closed, oriented, and have positive occupied volume.")
         except Exception as exc:  # pragma: no cover - depends on native extension
             errors.append(f"Scene region {region_id} failed manifold3d topology validation: {type(exc).__name__}.")
 
+    referenced_operands: set[str] = set()
+    for region in regions:
+        if not isinstance(region, Mapping):
+            continue
+        geometry_value = region.get("geometry", region)
+        geometry = geometry_value if isinstance(geometry_value, Mapping) else {}
+        operands = geometry.get("boolean_operands", region.get("boolean_operands", []))
+        if isinstance(operands, list):
+            referenced_operands.update(str(item) for item in operands)
     for region in regions:
         if not isinstance(region, Mapping):
             errors.append("Every scene region must be an object with explicit ownership.")
             continue
         identifier = str(region.get("id", ""))
+        if not region.get("visible", True) and identifier not in referenced_operands:
+            continue
         if not identifier or identifier in identifiers:
             errors.append("Scene region identifiers must be unique and non-empty.")
         identifiers.add(identifier)
@@ -443,17 +518,22 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
                         finite_positive(value, f"Scene region {identifier or '<unnamed>'} dimension {axis}")
             else:
                 errors.append(f"Scene region {identifier or '<unnamed>'} primitive dimensions are invalid.")
-        if kind in {"imported", "stl", "3mf", "mesh", "imported_mesh"} or "vertices" in geometry or "faces" in geometry:
-            validate_mesh(identifier or "<unnamed>", geometry)
+        if kind in {"imported", "stl", "3mf", "mesh", "imported_mesh"} or "vertices" in geometry or "faces" in geometry or region.get("source_path") or geometry.get("source_path"):
+            validate_mesh(identifier or "<unnamed>", region, geometry)
         operands = geometry.get("boolean_operands", region.get("boolean_operands"))
         operation = geometry.get("boolean_operation", geometry.get("operation"))
         if operands or operation:
-            if not isinstance(operands, list) or len(operands) < 2 or str(operation).lower() not in {"union", "subtract", "intersection"}:
+            if not isinstance(operands, list) or len(operands) < 2 or str(operation).lower() not in {"union", "subtract", "intersect", "intersection"}:
                 errors.append(f"Scene region {identifier or '<unnamed>'} has an invalid Boolean CSG contract.")
             elif not manifold_available:
                 errors.append(f"Scene region {identifier or '<unnamed>'} requires canonical manifold3d Boolean validation; {manifold_error}.")
     if not regions:
         warnings.append("Scene contains no printable regions.")
+    elif not errors:
+        try:
+            canonical_scene(dict(scene))
+        except GeometryValidationError as exc:
+            errors.append(str(exc))
     return {
         "schema": "voxelweave.scene-validation.v1",
         "passed": not errors,

@@ -161,7 +161,7 @@ export const syntheticProjectDocument: ProjectDocument = {
   },
   send: {
     packageExported: false,
-    connection: "Prusa XL ready",
+    connection: "local only",
     printStarted: false,
   },
   verify: {

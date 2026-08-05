@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 
 from .dicom import Volume
 from .errors import GeometryValidationError
+from .models import canonicalize
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,72 @@ class ScanBackVerification:
             "warnings": list(self.warnings),
             "dose_gamma": "not_used_hu_gamma_is_not_dose_gamma",
         }
+
+
+def export_verification_package(
+    verification: ScanBackVerification,
+    directory: str | Path,
+    *,
+    run_id: str | None = None,
+    gcode_sha256: str | None = None,
+    source_to_print_transform: object | None = None,
+) -> dict[str, Any]:
+    """Write a deterministic, hash-indexed verification evidence package."""
+
+    target = Path(directory)
+    target.mkdir(parents=True, exist_ok=True)
+    report_path = target / "verification-report.json"
+    provenance_path = target / "provenance.json"
+    report = {
+        "schema": "voxelweave.verification-report.v1",
+        "verification": verification.to_dict(),
+        "run_id": run_id,
+        "gcode_sha256": gcode_sha256,
+        "source_to_print_transform": source_to_print_transform,
+        "evidence_boundary": {
+            "comparison_type": "registered_signed_hu_scan_back",
+            "dose_gamma": "not_used_hu_gamma_is_not_dose_gamma",
+            "physical_fidelity_claim": "evidence_recorded_not_established",
+            "clinical_use": "research_only_not_for_diagnosis_or_treatment",
+        },
+    }
+    provenance = {
+        "schema": "voxelweave.verification-provenance.v1",
+        "source_hash": verification.source_hash,
+        "scan_back_hash": verification.scan_back_hash,
+        "registration_method": verification.registration_method,
+        "translation_voxel_zyx": list(verification.translation_voxel_zyx),
+        "raw_evidence_preserved_by_reference": True,
+    }
+    report_path.write_text(json.dumps(canonicalize(report), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    provenance_path.write_text(json.dumps(canonicalize(provenance), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    artifacts = (report_path, provenance_path)
+    hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in artifacts}
+    hashes_path = target / "hashes.json"
+    hashes_path.write_text(json.dumps({"schema": "voxelweave.verification-hashes.v1", "files": hashes}, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    package_path = target / "verification-report.zip"
+    with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_STORED, strict_timestamps=False) as archive:
+        for path in sorted((*artifacts, hashes_path), key=lambda item: item.name):
+            info = zipfile.ZipInfo(path.name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, path.read_bytes())
+    all_hashes = {
+        **hashes,
+        hashes_path.name: hashlib.sha256(hashes_path.read_bytes()).hexdigest(),
+        package_path.name: hashlib.sha256(package_path.read_bytes()).hexdigest(),
+    }
+    return {
+        "schema": "voxelweave.verification-package.v1",
+        "directory": str(target),
+        "report_path": str(report_path),
+        "package_name": package_path.name,
+        "package_path": str(package_path),
+        "files": sorted(path.name for path in (*artifacts, hashes_path, package_path)),
+        "hashes": all_hashes,
+        "automatic_print_start": False,
+        "physical_fidelity_claim": "evidence_recorded_not_established",
+    }
 
 
 def _overlap(reference: np.ndarray, moving: np.ndarray, shift_zyx: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray]:

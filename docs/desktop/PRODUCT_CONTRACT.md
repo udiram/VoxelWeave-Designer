@@ -33,13 +33,15 @@ Selection types:
 
 Continuous output never inserts artificial solid faces at source-slice boundaries and never treats one DICOM slice as one printer layer. Tile labels, notches, tabs, anchors, and spacing are structural regions outside the calibrated measurement region.
 
-Crop bounds are stored in physical patient coordinates and synchronized across all MPR panes and the 3D crop box. Physical aspect ratio is locked by default. The run report records the complete source-to-print transform and resampling method.
+Crop bounds are stored in physical patient coordinates and synchronized across all MPR panes and the 3D crop box. Physical aspect ratio is locked by default. The run report records the complete source-to-print transform and resampling method. A single-plane transform has a zero normal-axis column and translates to the selected source plane. Tile output records one such matrix per tile/source index because a set of independently placed planes cannot be represented by one affine matrix.
 
 ## Geometry and Regions
 
-Design supports boxes, cylinders, wedges, regular-polygon prisms, polygon extrusions, transforms, snapping, alignment, grouping, union, subtraction, intersection, and STL/3MF import with 3MF preferred.
+Design supports boxes, cylinders, wedges, regular-polygon prisms, polygon extrusions, transforms, snapping, alignment, grouping, union, subtraction, intersection, and STL/3MF import with 3MF preferred. Imported topology is previewed interactively, but canonical generation reads the explicitly authorized local mesh file directly and records its SHA-256; large mesh arrays are never embedded in the bounded JSON control channel or saved project document.
 
 The scene tree preserves Boolean operands. Occupied solid and material/tool ownership are separate concepts. DICOM-derived material, structural supports, fixtures, frames, bases, and inserts remain explicitly owned regions. Ambiguous overlap blocks slicing.
+
+Modeled objects use the Designer scene frame in millimetres. Combined DICOM/model runs center the DICOM print selection on the Designer origin and record the exact scene-to-print transform in the run report; the selection manifest independently records the complete source physical-coordinate transform. Modeled-only runs record the canonical scene-bounds translation.
 
 ## Calibration and Rail Field
 
@@ -53,13 +55,14 @@ VoxelWeave emits alternating X/Y variable-width roads at a global layer height, 
 
 The run package contains plaintext G-code, run report, toolpath trace, DICOM selection manifest, source-to-print transform, exact generated-segment preview stream, and SHA-256 hashes. Final G-code is reverse-parsed and compared with the preview stream for coordinates, widths, tools, feedrates, extrusion, bounds, and wrapper identity.
 
+Opening a saved project clears process-local generated/audited/exported/verification flags. If the document references local DICOM or mesh sources, the desktop app lists their count and requires an explicit reauthorization confirmation for the new session before those paths are made available to the sidecar. Generation then reconstructs the persisted DICOM selection from its normalized fields, preventing stale cross-project engine state.
+
 ## Send and Verify
 
-Send supports local export and optional Prusa Connect upload through Keychain-backed credentials. The app never automatically starts a printer.
+Send supports local, inspectable run-package export. Printer-service upload is not included in this release, and the app never automatically starts a printer.
 
 Verify imports scan-back data, records registration method and confidence, preserves raw and transformed evidence, and exports inspectable comparisons. HU gamma remains distinct from dose gamma. No software state can claim deposited width or physical HU fidelity without accepted physical calibration and scan-back evidence.
 
 ## Release Boundary
 
 The release contains only Apple Silicon `.app`, DMG, and native sidecar artifacts. Architecture inspection fails for Intel-only or unexpected universal components. The app must launch without Homebrew, system Python, Node, or Rosetta installed.
-

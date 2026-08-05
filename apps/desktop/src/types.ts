@@ -24,6 +24,8 @@ export interface SceneObject {
   kind: "box" | "cylinder" | "wedge" | "polygon-prism" | "extrusion" | "dicom" | "fixture" | "group";
   region: "measurement" | "support" | "fixture";
   tool: ToolId;
+  /** Explicit modeled-solid target used by the accepted tool calibration. */
+  targetHu?: number;
   transform: {
     position: Vec3;
     rotation: Vec3;
@@ -99,6 +101,7 @@ export interface PrintSelection {
   crop: CropBounds;
   scale: number;
   stride: number;
+  singleThicknessMm?: number;
   tileThicknessMm?: number;
   outputDimensionsMm?: Vec3;
   sourceToPrintTransform?: number[];
@@ -161,7 +164,7 @@ export interface SendState {
   exportHash?: string;
   packageDirectory?: string;
   files?: string[];
-  connection: "local only" | "Prusa XL ready";
+  connection: "local only";
   printStarted: false;
 }
 
@@ -180,6 +183,17 @@ export interface VerifyState {
   };
   sourcePath?: string;
   reportPath?: string;
+  provenance?: {
+    sourceHash: string;
+    scanBackHash: string;
+    translationVoxelZyx: [number, number, number];
+    correlation?: number;
+    huGammaPassPercent: number;
+    huGammaToleranceHu: number;
+    physicalFidelityStatus: string;
+    warnings: string[];
+    doseGamma: "not_used_hu_gamma_is_not_dose_gamma";
+  };
 }
 
 export interface ProjectDocument {
@@ -238,11 +252,13 @@ export type ProjectAction =
   | { type: "SET_SCENE_TRANSFORM"; id: string; transform: Partial<SceneObject["transform"]> }
   | { type: "SET_SCENE_DIMENSIONS"; id: string; dimensionsMm: Vec3 }
   | { type: "SET_SCENE_OWNERSHIP"; id: string; region?: SceneObject["region"]; tool?: ToolId }
+  | { type: "SET_SCENE_TARGET_HU"; id: string; targetHu: number }
   | { type: "TOGGLE_SCENE_VISIBILITY"; id: string }
   | { type: "ADD_PRIMITIVE"; kind: SceneObject["kind"] }
   | { type: "BOOLEAN_SCENE"; operation: "union" | "subtract" | "intersect"; operandIds: string[] }
   | { type: "IMPORT_SOLID"; path: string; format: "stl" | "3mf" }
   | { type: "SET_IMPORTED_SOLID"; path: string; format: "stl" | "3mf"; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3 }
+  | { type: "HYDRATE_IMPORTED_SOLID"; id: string; vertices: number[][]; faces: number[][]; dimensionsMm: Vec3 }
   | { type: "SET_TOAST"; message: string }
   | { type: "CLEAR_TOAST" };
 
@@ -258,6 +274,7 @@ export interface DicomSelectionResult {
   physicalThicknessMm: number;
   transformHash: string;
   sourceToPrintTransform?: number[];
+  outputDimensionsMm?: Vec3;
 }
 
 export interface ToolpathResult {
@@ -279,4 +296,5 @@ export interface VerifyScanBackResult {
   registrationMethod: VerifyState["registrationMethod"];
   confidence: VerifyState["confidence"];
   comparison: VerifyState["comparison"];
+  provenance: NonNullable<VerifyState["provenance"]>;
 }

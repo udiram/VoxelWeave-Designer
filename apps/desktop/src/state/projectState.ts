@@ -1,11 +1,54 @@
 import { syntheticProjectDocument } from "../data/fixtures";
-import type { CalibrationProfile, CropBounds, DicomSource, ProjectAction, ProjectState, ProjectUiState } from "../types";
+import type { CalibrationProfile, CropBounds, DicomSource, ProjectAction, ProjectState, ProjectUiState, Vec3 } from "../types";
 
 const requiredCalibrationFields: Array<keyof Pick<CalibrationProfile, "name" | "material" | "lot" | "printer" | "scanner" | "reconstruction">> = ["name", "material", "lot", "printer", "scanner", "reconstruction"];
 
 function sourcePlaneMaxIndex(source: DicomSource, orientation: ProjectState["selection"]["orientation"]): number {
   const dimension = orientation === "axial" ? source.dimensions.z : orientation === "sagittal" ? source.dimensions.x : source.dimensions.y;
   return Math.max(0, dimension - 1);
+}
+
+function sourceAxisSpacing(source: DicomSource, axis: number): number {
+  return axis === 0 ? source.spacing.x : axis === 1 ? source.spacing.y : source.spacing.z;
+}
+
+function orientationAxes(orientation: ProjectState["selection"]["orientation"]): [number, number, number] {
+  if (orientation === "axial") return [0, 1, 2];
+  if (orientation === "sagittal") return [1, 2, 0];
+  return [0, 2, 1];
+}
+
+export function selectionOutputDimensions(source: DicomSource, selection: ProjectState["selection"]): Vec3 {
+  const direction = source.directionLps && source.directionLps.length === 3 && source.directionLps.every((row) => row.length === 3)
+    ? source.directionLps
+    : [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const dimensions = [source.dimensions.x, source.dimensions.y, source.dimensions.z];
+  if (dimensions.some((value) => value <= 0) || [source.spacing.x, source.spacing.y, source.spacing.z].some((value) => value <= 0)) return { x: 0, y: 0, z: 0 };
+  const cropCorners = [0, 1].flatMap((x) => [0, 1].flatMap((y) => [0, 1].map((z) => [selection.crop.x[x], selection.crop.y[y], selection.crop.z[z]])));
+  const voxelCorners = cropCorners.map((corner) => {
+    const delta = [corner[0] - source.origin.x, corner[1] - source.origin.y, corner[2] - source.origin.z];
+    return [0, 1, 2].map((axis) => {
+      const localMm = direction[0][axis] * delta[0] + direction[1][axis] * delta[1] + direction[2][axis] * delta[2];
+      return Math.max(0, Math.min(dimensions[axis] - 1, localMm / sourceAxisSpacing(source, axis)));
+    });
+  });
+  const low = [0, 1, 2].map((axis) => Math.min(...voxelCorners.map((corner) => corner[axis])));
+  const high = [0, 1, 2].map((axis) => Math.max(...voxelCorners.map((corner) => corner[axis])));
+  const [printX, printY, normal] = orientationAxes(selection.orientation);
+  const scale = Number.isFinite(selection.scale) && selection.scale > 0 ? selection.scale : 1;
+  const inPlaneSize = (axis: number) => (high[axis] - low[axis] + 1) * sourceAxisSpacing(source, axis) * scale;
+  const boundedStart = Math.max(0, Math.min(selection.start, dimensions[normal] - 1));
+  const boundedEnd = Math.max(boundedStart, Math.min(selection.end, dimensions[normal] - 1));
+  const inclusiveDepth = (boundedEnd - boundedStart + 1) * sourceAxisSpacing(source, normal);
+  const configuredThickness = selection.kind === "single"
+    ? selection.singleThicknessMm && selection.singleThicknessMm > 0 ? selection.singleThicknessMm : sourceAxisSpacing(source, normal)
+    : selection.tileThicknessMm && selection.tileThicknessMm > 0 ? selection.tileThicknessMm : sourceAxisSpacing(source, normal);
+  const outputDepth = selection.outputMode === "tiles" || selection.kind === "tiles" || selection.kind === "single" ? configuredThickness : inclusiveDepth * scale;
+  return {
+    x: Number(inPlaneSize(printX).toFixed(3)),
+    y: Number(inPlaneSize(printY).toFixed(3)),
+    z: Number(outputDepth.toFixed(3)),
+  };
 }
 
 export function validateCalibrationProfile(profile: CalibrationProfile): string[] {
@@ -68,6 +111,31 @@ export function createInitialProjectState(recovered = false): ProjectState {
   return { ...structuredClone(syntheticProjectDocument), ui };
 }
 
+function invalidateDerivedRun(state: ProjectState): Pick<ProjectState, "toolpath" | "send" | "verify"> {
+  return {
+    toolpath: {
+      ...state.toolpath,
+      generated: false,
+      audited: false,
+      runId: undefined,
+      totalLayers: 0,
+      selectedLayer: 0,
+      clippingPercent: 0,
+      clippingAcknowledged: false,
+      estimated: { printTime: "Unavailable", t0Grams: null, t1Grams: null, toolChanges: 0 },
+    },
+    send: { packageExported: false, connection: "local only", printStarted: false },
+    verify: {
+      evidenceImported: false,
+      registrationMethod: "not registered",
+      confidence: "low",
+      comparisonMode: state.verify.comparisonMode,
+      reportExported: false,
+      comparison: { meanAbsoluteHu: 0, p95AbsoluteHu: 0, registeredVoxels: 0 },
+    },
+  };
+}
+
 export function projectReducer(state: ProjectState, action: ProjectAction): ProjectState {
   switch (action.type) {
     case "OPEN_SYNTHETIC_PROJECT":
@@ -78,11 +146,29 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "OPEN_PROJECT":
       return {
         ...structuredClone(action.project),
+        toolpath: {
+          ...action.project.toolpath,
+          generated: false,
+          audited: false,
+          runId: undefined,
+          clippingPercent: 0,
+          clippingAcknowledged: false,
+          estimated: { printTime: "Not generated", t0Grams: null, t1Grams: null, toolChanges: 0 },
+        },
+        send: { packageExported: false, connection: "local only", printStarted: false },
+        verify: {
+          evidenceImported: false,
+          registrationMethod: "not registered",
+          confidence: "low",
+          comparisonMode: action.project.verify.comparisonMode,
+          reportExported: false,
+          comparison: { meanAbsoluteHu: 0, p95AbsoluteHu: 0, registeredVoxels: 0 },
+        },
         ui: {
           ...createInitialProjectState().ui,
           filePath: action.path,
           selectedSceneId: action.project.scene[0]?.id ?? "",
-          toast: action.path ? `Opened ${action.path.split(/[\\/]/).pop()}` : "Opened project",
+          toast: action.path ? `Opened ${action.path.split(/[\\/]/).pop()} · regenerate to restore runtime evidence` : "Opened project · regenerate to restore runtime evidence",
           autosaveState: "saved",
           lastSavedAt: action.project.savedAt,
         },
@@ -96,11 +182,11 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "SET_SELECTION": {
       const selection = { ...state.selection, ...action.patch };
       const spacing = selection.orientation === "axial" ? state.source.spacing.z : selection.orientation === "sagittal" ? state.source.spacing.x : state.source.spacing.y;
-      const span = selection.kind === "single" ? 1 : Math.max(1, selection.end - selection.start);
       const maxIndex = sourcePlaneMaxIndex(state.source, selection.orientation);
       const boundedStart = Math.max(0, Math.min(selection.start, maxIndex));
       const boundedEnd = Math.max(boundedStart, Math.min(selection.end, maxIndex));
-      return { ...state, selection: { ...selection, start: boundedStart, end: boundedEnd, stride: Math.max(1, selection.stride), thicknessMm: Number((span * spacing).toFixed(3)), outputDimensionsMm: { x: Math.abs(selection.crop.x[1] - selection.crop.x[0]) * selection.scale, y: Math.abs(selection.crop.y[1] - selection.crop.y[0]) * selection.scale, z: Number((span * spacing * selection.scale).toFixed(3)) } } };
+      const normalized = { ...selection, start: boundedStart, end: boundedEnd, stride: Math.max(1, selection.stride), thicknessMm: Number(((boundedEnd - boundedStart + 1) * spacing).toFixed(3)) };
+      return { ...state, ...invalidateDerivedRun(state), selection: { ...normalized, created: false, outputDimensionsMm: selectionOutputDimensions(state.source, normalized) } };
     }
     case "SET_DICOM_SOURCE": {
       const source = action.source;
@@ -109,50 +195,55 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const start = Math.min(state.selection.start, end);
       const spacing = state.selection.orientation === "axial" ? source.spacing.z : state.selection.orientation === "sagittal" ? source.spacing.x : source.spacing.y;
       const physicalBounds = sourcePhysicalBounds(source);
-      const hasDicomObject = state.scene.some((object) => object.kind === "dicom" && object.sourcePath === source.path);
-      const scene = hasDicomObject || !source.path ? state.scene : [...state.scene, {
+      const existingDicom = state.scene.find((object) => object.kind === "dicom" && object.sourcePath === source.path);
+      const nonDicomScene = state.scene.filter((object) => object.kind !== "dicom");
+      const scene = !source.path ? nonDicomScene : [...nonDicomScene, {
+        ...existingDicom,
         id: "scene-dicom-source",
         name: source.name,
         kind: "dicom" as const,
         region: "measurement" as const,
-        tool: "T0" as const,
+        tool: existingDicom?.tool ?? "T0" as const,
         sourcePath: source.path,
         dimensionsMm: { x: Math.max(0, source.dimensions.x - 1) * source.spacing.x, y: Math.max(0, source.dimensions.y - 1) * source.spacing.y, z: Math.max(0, source.dimensions.z - 1) * source.spacing.z },
         transform: { position: source.origin, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
-        visible: true,
+        visible: existingDicom?.visible ?? true,
       }];
+      const selection = {
+        ...state.selection,
+        start,
+        end,
+        thicknessMm: Number(((end - start + 1) * spacing).toFixed(3)),
+        crop: physicalBounds,
+        created: false,
+      };
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         source,
         scene,
-        selection: {
-          ...state.selection,
-          start,
-          end,
-          thicknessMm: Number((Math.max(1, end - start) * spacing).toFixed(3)),
-          crop: physicalBounds,
-          created: false,
-          outputDimensionsMm: { x: Math.abs(physicalBounds.x[1] - physicalBounds.x[0]), y: Math.abs(physicalBounds.y[1] - physicalBounds.y[0]), z: Number((Math.max(1, end - start) * spacing).toFixed(3)) },
-        },
+        selection: { ...selection, outputDimensionsMm: selectionOutputDimensions(source, selection) },
         ui: { ...state.ui, selectedSceneId: scene.find((object) => object.kind === "dicom")?.id ?? scene[0]?.id ?? state.ui.selectedSceneId, toast: `Loaded ${source.name} · ${source.sliceCount} slices` },
       };
     }
     case "CREATE_PRINT_SELECTION":
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         selection: { ...state.selection, created: true },
         ui: { ...state.ui, toast: "Print selection created from physical coordinates" },
       };
     case "SET_SELECTION_RESULT":
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         selection: {
           ...state.selection,
           created: true,
           selectionId: action.result.selectionId,
           transformHash: action.result.transformHash,
           sourceToPrintTransform: action.result.sourceToPrintTransform ?? state.selection.sourceToPrintTransform,
-          outputDimensionsMm: state.selection.outputDimensionsMm,
+          outputDimensionsMm: action.result.outputDimensionsMm ?? state.selection.outputDimensionsMm,
         },
         ui: { ...state.ui, toast: `Print selection created · ${action.result.selectionId}` },
       };
@@ -161,9 +252,9 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const existing = state.calibrations.some((candidate) => candidate.id === profile.id);
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         calibrations: existing ? state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate) : [...state.calibrations, profile],
         selection: state.selection.calibrationId === profile.id ? { ...state.selection, calibrationId: profile.id } : state.selection,
-        toolpath: existing ? { ...state.toolpath, generated: false, audited: false, runId: undefined } : state.toolpath,
         ui: { ...state.ui, toast: profile.mismatch ? `Calibration imported; edit required: ${profile.mismatch}` : `Calibration profile ${profile.name || profile.id} is ready for review` },
       };
     }
@@ -171,23 +262,24 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       const current = state.calibrations.find((candidate) => candidate.id === action.id);
       if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
       const profile = profileWithValidation({ ...current, ...action.patch, accepted: false }, false);
-      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate), toolpath: { ...state.toolpath, generated: false, audited: false, runId: undefined }, ui: { ...state.ui, toast: profile.mismatch ? `Calibration needs review: ${profile.mismatch}` : "Calibration edits saved; accept the profile to bind it to generation" } };
+      return { ...state, ...invalidateDerivedRun(state), calibrations: state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate), ui: { ...state.ui, toast: profile.mismatch ? `Calibration needs review: ${profile.mismatch}` : "Calibration edits saved; accept the profile to bind it to generation" } };
     }
     case "ACCEPT_CALIBRATION_PROFILE": {
       const current = state.calibrations.find((candidate) => candidate.id === action.id);
       if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
       const errors = validateCalibrationProfile(current);
       if (errors.length) return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: false, mismatch: errors.join("; ") } : candidate), ui: { ...state.ui, toast: `Cannot accept calibration: ${errors.join(" · ")}` } };
-      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: true, mismatch: undefined } : candidate), selection: { ...state.selection, calibrationId: action.id }, ui: { ...state.ui, toast: `Accepted calibration ${current.name}` } };
+      return { ...state, ...invalidateDerivedRun(state), calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: true, mismatch: undefined } : candidate), selection: { ...state.selection, calibrationId: action.id }, ui: { ...state.ui, toast: `Accepted calibration ${current.name}` } };
     }
     case "REVOKE_CALIBRATION_PROFILE": {
       const current = state.calibrations.find((candidate) => candidate.id === action.id);
       if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
-      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: false, mismatch: "Acceptance revoked; review before generation" } : candidate), selection: state.selection.calibrationId === action.id ? { ...state.selection, calibrationId: undefined } : state.selection, toolpath: { ...state.toolpath, generated: false, audited: false, runId: undefined }, ui: { ...state.ui, toast: `Revoked calibration ${current.name}; generation is blocked until re-accepted` } };
+      return { ...state, ...invalidateDerivedRun(state), calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: false, mismatch: "Acceptance revoked; review before generation" } : candidate), selection: state.selection.calibrationId === action.id ? { ...state.selection, calibrationId: undefined } : state.selection, ui: { ...state.ui, toast: `Revoked calibration ${current.name}; generation is blocked until re-accepted` } };
     }
     case "REVIEW_CALIBRATION":
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         selection: { ...state.selection, calibrationId: action.profileId },
         ui: { ...state.ui, toast: `Reviewed ${state.calibrations.find((profile) => profile.id === action.profileId)?.name ?? "calibration profile"}` },
       };
@@ -203,7 +295,8 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
       }
       return {
         ...state,
-        toolpath: { ...state.toolpath, generated: true, runId: action.runId, estimated: action.estimate, clippingPercent: action.clippingPercent ?? state.toolpath.clippingPercent },
+        ...invalidateDerivedRun(state),
+        toolpath: { ...state.toolpath, generated: true, audited: false, clippingAcknowledged: false, runId: action.runId, estimated: action.estimate, clippingPercent: action.clippingPercent ?? state.toolpath.clippingPercent },
         ui: { ...state.ui, toast: "Generated-segment preview ready; clipping review is required before audited output" },
       };
     case "SET_LAYER":
@@ -228,11 +321,14 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         verify: {
           ...state.verify,
           evidenceImported: true,
+          reportExported: false,
+          reportPath: undefined,
           evidenceName: action.evidenceName ?? action.result?.evidenceName ?? state.verify.evidenceName,
           sourcePath: action.sourcePath,
           registrationMethod: action.result?.registrationMethod ?? "landmark rigid",
           confidence: action.result?.confidence ?? "high",
           comparison: action.result?.comparison ?? state.verify.comparison,
+          provenance: action.result?.provenance ?? state.verify.provenance,
         },
         ui: { ...state.ui, workspace: "verify", toast: `Imported ${action.evidenceName ?? action.result?.evidenceName ?? "scan-back evidence"}` },
       };
@@ -248,25 +344,35 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "SET_SCENE_TRANSFORM":
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         scene: state.scene.map((object) => object.id === action.id ? { ...object, transform: { ...object.transform, ...action.transform } } : object),
       };
     case "SET_SCENE_DIMENSIONS":
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         scene: state.scene.map((object) => object.id === action.id ? { ...object, dimensionsMm: action.dimensionsMm, transform: { ...object.transform, scale: action.dimensionsMm } } : object),
       };
     case "SET_SCENE_OWNERSHIP":
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         scene: state.scene.map((object) => object.id === action.id ? { ...object, region: action.region ?? object.region, tool: action.tool ?? object.tool } : object),
       };
+    case "SET_SCENE_TARGET_HU":
+      return {
+        ...state,
+        ...invalidateDerivedRun(state),
+        scene: state.scene.map((object) => object.id === action.id ? { ...object, targetHu: action.targetHu } : object),
+      };
     case "TOGGLE_SCENE_VISIBILITY":
-      return { ...state, scene: state.scene.map((object) => object.id === action.id ? { ...object, visible: !object.visible } : object) };
+      return { ...state, ...invalidateDerivedRun(state), scene: state.scene.map((object) => object.id === action.id ? { ...object, visible: !object.visible } : object) };
     case "ADD_PRIMITIVE": {
       const number = state.scene.filter((object) => object.kind === action.kind).length + 1;
       const id = `scene-${action.kind}-${number}`;
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         scene: [...state.scene, {
           id,
           name: `${action.kind[0].toUpperCase()}${action.kind.slice(1)} ${number}`,
@@ -284,15 +390,21 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "BOOLEAN_SCENE": {
       const selectedIds = action.operandIds.filter((id) => state.scene.some((object) => object.id === id));
       if (selectedIds.length < 2) return { ...state, ui: { ...state.ui, toast: "Select at least two scene operands before applying a Boolean" } };
+      const operands = selectedIds.map((id) => state.scene.find((object) => object.id === id)).filter((object): object is NonNullable<typeof object> => Boolean(object));
+      const ownership = new Set(operands.map((object) => `${object.tool}:${object.region}:${object.targetHu ?? "calibrated-default"}`));
+      if (ownership.size !== 1) return { ...state, ui: { ...state.ui, toast: "Boolean operands must share one tool, region, and target HU; split mixed-material geometry into explicit regions" } };
+      const inherited = operands[0];
       const resultId = `scene-boolean-${state.scene.filter((object) => object.kind === "group").length + 1}`;
       return {
         ...state,
+        ...invalidateDerivedRun(state),
         scene: [...state.scene.map((object) => selectedIds.includes(object.id) ? { ...object, visible: false } : object), {
           id: resultId,
           name: `${action.operation[0].toUpperCase()}${action.operation.slice(1)} result`,
           kind: "group",
-          region: "measurement",
-          tool: "T0",
+          region: inherited.region,
+          tool: inherited.tool,
+          targetHu: inherited.targetHu,
           transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
           boolean: { operation: action.operation, operands: selectedIds },
           visible: true,
@@ -303,13 +415,15 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
     case "IMPORT_SOLID": {
       const number = state.scene.filter((object) => object.sourcePath).length + 1;
       const id = `scene-import-${number}`;
-      return { ...state, scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} · validate before generation` } };
+      return { ...state, ...invalidateDerivedRun(state), scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} · validate before generation` } };
     }
     case "SET_IMPORTED_SOLID": {
       const number = state.scene.filter((object) => object.sourcePath).length + 1;
       const id = `scene-import-${number}`;
-      return { ...state, scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, sourceDimensionsMm: action.dimensionsMm, vertices: action.vertices, faces: action.faces, dimensionsMm: action.dimensionsMm, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: action.dimensionsMm }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} mesh · ${action.vertices.length} vertices · validate before generation` } };
+      return { ...state, ...invalidateDerivedRun(state), scene: [...state.scene, { id, name: `${action.format.toUpperCase()} import ${number}`, kind: "fixture", region: "fixture", tool: "T1", sourcePath: action.path, sourceDimensionsMm: action.dimensionsMm, vertices: action.vertices, faces: action.faces, dimensionsMm: action.dimensionsMm, transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: action.dimensionsMm }, visible: true }], ui: { ...state.ui, selectedSceneId: id, toast: `Imported ${action.format.toUpperCase()} mesh · ${action.vertices.length} vertices · validate before generation` } };
     }
+    case "HYDRATE_IMPORTED_SOLID":
+      return { ...state, scene: state.scene.map((object) => object.id === action.id ? { ...object, vertices: action.vertices, faces: action.faces, sourceDimensionsMm: action.dimensionsMm } : object) };
     case "SET_TOAST":
       return { ...state, ui: { ...state.ui, toast: action.message } };
     case "CLEAR_TOAST":

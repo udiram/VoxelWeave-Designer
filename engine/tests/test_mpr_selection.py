@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from voxelweave import (
     calculate_histogram,
@@ -10,6 +11,7 @@ from voxelweave import (
     request_volume_preview,
     sample_voxel,
 )
+from voxelweave.errors import GeometryValidationError
 
 
 def test_mpr_planes_use_physical_source_and_preview_is_derived() -> None:
@@ -76,10 +78,29 @@ def test_continuous_tile_and_single_selection_contracts() -> None:
     assert tile.manifest.plate_layout["rows"] == 2
     assert [item["label"] for item in tile.manifest.structural_regions] == ["A", "B", "C"]
     assert tile.manifest.structural_regions[0]["region"] == "structural_outside_measurement_roi"
+    assert len(tile.manifest.tile_source_to_print_transforms) == 3
+    assert [item["source_index"] for item in tile.manifest.tile_source_to_print_transforms] == [1, 3, 5]
+    assert [item["matrix"][0][3] for item in tile.manifest.tile_source_to_print_transforms] == [1.0, 3.0, 5.0]
+    assert all(item["matrix"][0][2] == 0.0 for item in tile.manifest.tile_source_to_print_transforms)
+    with pytest.raises(GeometryValidationError, match="Tile thickness must agree"):
+        create_print_selection(
+            volume,
+            plane="sagittal",
+            mode="tile",
+            start_index=1,
+            end_index=2,
+            thickness_mm=0.5,
+            print_size_mm=(8.0, 8.0, 0.5),
+            plate_layout={"columns": 2, "tile_thickness_mm": 0.7},
+        )
 
     single = create_print_selection(volume, plane="coronal", mode="single", plane_index=3, thickness_mm=2.0, layer_height_mm=1.0)
     assert single.selected_source_indices == (3,)
     assert single.print_size_mm[2] == 2.0
+    assert single.manifest.source_bounds_voxel_xyz[0][1] == 3.0
+    assert single.manifest.source_bounds_voxel_xyz[1][1] == 3.0
+    assert single.manifest.source_to_print_transform[1][2] == 0.0
+    assert single.manifest.source_to_print_transform[1][3] == 3.0
 
 
 def test_continuous_range_samples_only_selected_slab_endpoints() -> None:

@@ -14,7 +14,10 @@ export async function authorizeNativePath(path: string): Promise<void> {
 }
 
 export function serializeProject(project: ProjectDocument): string {
-  return JSON.stringify({ ...project, schemaVersion: PROJECT_SCHEMA_VERSION });
+  const scene = project.scene.map((object) => object.sourcePath && !object.sourcePath.startsWith("synthetic://")
+    ? { ...object, vertices: undefined, faces: undefined }
+    : object);
+  return JSON.stringify({ ...project, scene, schemaVersion: PROJECT_SCHEMA_VERSION });
 }
 
 export function migrateProject(input: unknown): ProjectDocument {

@@ -18,7 +18,10 @@ from .binary import write_binary_array
 from .calibration import Calibration, CalibrationBinding, CalibrationSet
 from .errors import CalibrationMismatchError, GeometryValidationError, ToolpathAuditError
 from .models import CancellationToken, ProgressCallback, Vec3, canonicalize
+from .scene import CanonicalScene, ModeledPrintSelection, canonical_scene, canonical_scene_manifest
 from .selection import PrintSelection
+
+SelectionInput = PrintSelection | ModeledPrintSelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +35,7 @@ class PrinterProfile:
     min_line_width_mm: float = 0.05
     max_line_width_mm: float = 1.0
     sample_step_mm: float = 2.0
+    min_segment_length_mm: float = 0.01
     wrapper_id: str = "voxelweave.prusa-xl.wrapper.v1"
     # Wrapper controls are explicit and deterministic.  Heating remains off by
     # default because generating a research artifact must not implicitly start
@@ -50,7 +54,7 @@ class PrinterProfile:
     def __post_init__(self) -> None:
         if any(float(item) <= 0 for item in self.build_volume_mm) or self.filament_diameter_mm <= 0 or self.max_flow_mm3_s <= 0:
             raise GeometryValidationError("Printer profile dimensions and flow limits must be positive.")
-        if self.min_line_width_mm <= 0 or self.max_line_width_mm < self.min_line_width_mm or self.sample_step_mm <= 0:
+        if self.min_line_width_mm <= 0 or self.max_line_width_mm < self.min_line_width_mm or self.sample_step_mm <= 0 or self.min_segment_length_mm <= 0:
             raise GeometryValidationError("Printer profile width and sampling limits are invalid.")
         if not 0.0 < self.first_layer_speed_scale <= 1.0 or not math.isfinite(self.first_layer_speed_scale):
             raise GeometryValidationError("First-layer speed scale must be finite and in (0, 1].")
@@ -85,6 +89,7 @@ class ToolpathSegment:
     tool: str
     material: str
     calibration_id: str
+    source_coordinate_frame: str = "patient_lps_mm"
     region: str = "measurement_roi"
     range_status: str = "in_range"
 
@@ -101,6 +106,7 @@ class ToolpathSegment:
             "end_xy_mm": list(self.end_xy_mm),
             "z_mm": self.z_mm,
             "source_position_lps": list(self.source_position_lps),
+            "source_coordinate_frame": self.source_coordinate_frame,
             "source_hu": self.source_hu,
             "target_hu": self.target_hu,
             "clipped_hu": self.clipped_hu,
@@ -147,7 +153,7 @@ class AuditReport:
 
 @dataclass(frozen=True, slots=True)
 class GeneratedToolpath:
-    selection: PrintSelection
+    selection: SelectionInput
     segments: tuple[ToolpathSegment, ...]
     gcode_text: str
     preview_records: np.ndarray
@@ -302,7 +308,7 @@ def _region_bounds(region: Mapping[str, Any]) -> tuple[float, float, float, floa
     return result
 
 
-def _dispatch_regions(selection: PrintSelection, scene: Mapping[str, Any] | None) -> tuple[dict[str, Any], ...]:
+def _dispatch_regions(selection: SelectionInput, scene: Mapping[str, Any] | None) -> tuple[dict[str, Any], ...]:
     """Return explicit region/tool ownership for deterministic multi-tool dispatch."""
 
     values: list[dict[str, Any]] = []
@@ -313,7 +319,11 @@ def _dispatch_regions(selection: PrintSelection, scene: Mapping[str, Any] | None
         scene_regions = scene.get("regions", [])
         if not isinstance(scene_regions, list):
             raise GeometryValidationError("Scene regions must be an array for tool dispatch.")
-        values.extend(dict(item) for item in scene_regions if isinstance(item, Mapping))
+        values.extend(
+            dict(item)
+            for item in scene_regions
+            if isinstance(item, Mapping) and item.get("visible", True) and str(item.get("kind", "")).lower() == "dicom"
+        )
     normalized: list[dict[str, Any]] = []
     for item in values:
         owner = _owner_tool(item.get("tool") or item.get("owner"))
@@ -362,7 +372,7 @@ def _tool_for_sample(
     )
 
 
-def _profile_binding(selection: PrintSelection, calibration: Calibration, profile: PrinterProfile) -> CalibrationBinding:
+def _profile_binding(selection: SelectionInput, calibration: Calibration, profile: PrinterProfile) -> CalibrationBinding:
     binding = calibration.binding
     if abs(binding.layer_height_mm - selection.layer_height_mm) > 1e-6:
         raise CalibrationMismatchError("Selection layer height does not match the accepted calibration.")
@@ -384,7 +394,9 @@ def _extrusion_and_feedrate(
     volume = length * width * layer_height
     if length <= 0 or width <= 0 or layer_height <= 0:
         raise GeometryValidationError("Printable segment length, width, and layer height must be positive.")
-    max_flow = min(profile.max_flow_mm3_s, calibration_flow_mm3_s)
+    # Reserve a deterministic one-percent margin for decimal G-code rounding,
+    # especially on short contour-clipped segments.
+    max_flow = min(profile.max_flow_mm3_s, calibration_flow_mm3_s) * 0.99
     # The volumetric cap is a hard safety limit.  A minimum-speed preference
     # must never be clamped back up when a wide road/layer would require a
     # slower feed to stay below that cap.
@@ -525,7 +537,7 @@ def _preview_records(segments: Sequence[ToolpathSegment], tools: Sequence[str]) 
 
 
 def generate_toolpath(
-    selection: PrintSelection,
+    selection: SelectionInput,
     calibration: CalibrationInput,
     *,
     profile: PrinterProfile | None = None,
@@ -548,6 +560,14 @@ def generate_toolpath(
     for candidate in calibrations.values():
         _profile_binding(selection, candidate, profile)
     regions = _dispatch_regions(selection, scene)
+    canonical: CanonicalScene | None = selection.canonical_scene if isinstance(selection, ModeledPrintSelection) else None
+    if canonical is None and scene is not None:
+        visible_modeled = [
+            item for item in scene.get("regions", [])
+            if isinstance(item, Mapping) and item.get("visible", True) and str(item.get("kind", "")).lower() != "dicom"
+        ]
+        if visible_modeled:
+            canonical = canonical_scene(dict(scene))
     width_limit = (profile.min_line_width_mm, profile.max_line_width_mm)
     segments: list[ToolpathSegment] = []
     tile_count = len(selection.selected_source_indices) if selection.mode == "tile" else 1
@@ -575,7 +595,7 @@ def generate_toolpath(
         for layer_index in range(selection.layer_count):
             if cancellation:
                 cancellation.checkpoint()
-            z_sample = min(selection.print_size_mm[2], (layer_index + 0.5) * selection.layer_height_mm)
+            z_sample = min(max(0.0, selection.print_size_mm[2] - 1e-9), (layer_index + 0.5) * selection.layer_height_mm)
             z_print = z_sample
             direction_x = layer_index % 2 == 0
             for line_number, line_coordinate in enumerate(positions_y if direction_x else positions_x):
@@ -583,62 +603,100 @@ def generate_toolpath(
                     start, end = (0.0, selection.print_size_mm[0]) if line_number % 2 == 0 else (selection.print_size_mm[0], 0.0)
                 else:
                     start, end = (0.0, selection.print_size_mm[1]) if line_number % 2 == 0 else (selection.print_size_mm[1], 0.0)
-                for a, b in _line_segments(start, end, profile.sample_step_mm):
-                    midpoint = (a + b) / 2.0
-                    x, y = (midpoint, line_coordinate) if direction_x else (line_coordinate, midpoint)
-                    region_name = "measurement_roi_tile" if selection.mode == "tile" else "measurement_roi"
-                    active_tool = _tool_for_sample(
-                        x_mm=x,
-                        y_mm=y,
-                        default_region=region_name,
-                        available_tools=calibrations,
-                        regions=regions,
-                        explicit_tool=tool,
-                    )
-                    selected_calibration = calibrations[active_tool]
-                    used_calibrations[active_tool] = selected_calibration
-                    pitch = selected_calibration.binding.pitch_mm
-                    source_position = selection.rail_sample_position(x, y, z_sample, tile_index=tile_index if selection.mode == "tile" else None)
-                    source_hu = selection.sample_hu(x, y, z_sample, tile_index=tile_index if selection.mode == "tile" else None)
-                    clipped_hu, widths, range_status = selected_calibration.map_hu(np.asarray([source_hu]), allow_clipping=allow_calibration_clipping)
-                    width = float(np.clip(widths[0], width_limit[0], width_limit[1]))
-                    local_start = (a, line_coordinate) if direction_x else (line_coordinate, a)
-                    local_end = (b, line_coordinate) if direction_x else (line_coordinate, b)
-                    extrusion, feedrate = _extrusion_and_feedrate(
-                        math.hypot(b - a, 0.0), width, selection.layer_height_mm, profile, selected_calibration.binding.effective_flow_mm3_s
-                    )
-                    if layer_index == 0:
-                        feedrate *= profile.first_layer_speed_scale
-                    feedrate = math.floor(feedrate * 1000.0) / 1000.0
-                    if range_status == "clipped":
-                        clipped_count += 1
-                        clipped_by_layer[str(layer_index)] = clipped_by_layer.get(str(layer_index), 0) + 1
-                        tile_key = str(tile_index if selection.mode == "tile" else 0)
-                        clipped_by_tile[tile_key] = clipped_by_tile.get(tile_key, 0) + 1
-                        clipped_by_region[region_name] = clipped_by_region.get(region_name, 0) + 1
-                    segments.append(
-                        ToolpathSegment(
-                            segment_index=len(segments),
-                            layer_index=layer_index,
-                            tile_index=tile_index if selection.mode == "tile" else None,
-                            start_xy_mm=(local_start[0] + offset_x, local_start[1] + offset_y),
-                            end_xy_mm=(local_end[0] + offset_x, local_end[1] + offset_y),
-                            z_mm=z_print,
-                            source_position_lps=source_position,
-                            source_hu=float(source_hu),
-                            target_hu=float(source_hu),
-                            clipped_hu=float(clipped_hu[0]),
-                            commanded_width_mm=width,
-                            effective_fill=float(width / pitch),
-                            feedrate_mm_min=float(feedrate),
-                            extrusion_mm=float(extrusion),
-                            tool=active_tool,
-                            material=selected_calibration.binding.material,
-                            calibration_id=selected_calibration.calibration_id,
-                            region=region_name,
-                            range_status=range_status,
+                if canonical is None:
+                    occupied_intervals: Sequence[tuple[float, float, Any | None]] = ((start, end, None),)
+                else:
+                    if isinstance(selection, ModeledPrintSelection):
+                        scene_origin = selection.scene_origin_mm
+                        scene_fixed = line_coordinate + (scene_origin[1] if direction_x else scene_origin[0])
+                        scene_start = start + (scene_origin[0] if direction_x else scene_origin[1])
+                        scene_end = end + (scene_origin[0] if direction_x else scene_origin[1])
+                        scene_z = z_sample + scene_origin[2]
+                        along_origin = scene_origin[0] if direction_x else scene_origin[1]
+                    else:
+                        scene_fixed = line_coordinate - (selection.print_size_mm[1] if direction_x else selection.print_size_mm[0]) / 2.0
+                        scene_start = start - (selection.print_size_mm[0] if direction_x else selection.print_size_mm[1]) / 2.0
+                        scene_end = end - (selection.print_size_mm[0] if direction_x else selection.print_size_mm[1]) / 2.0
+                        scene_z = z_sample - selection.print_size_mm[2] / 2.0
+                        along_origin = -(selection.print_size_mm[0] if direction_x else selection.print_size_mm[1]) / 2.0
+                    occupied_intervals = tuple(
+                        (first - along_origin, second - along_origin, owner)
+                        for first, second, owner in canonical.partition_line(
+                            z=scene_z,
+                            fixed=scene_fixed,
+                            start=scene_start,
+                            end=scene_end,
+                            direction_x=direction_x,
                         )
+                        if owner is not None or not isinstance(selection, ModeledPrintSelection)
                     )
+                for interval_start, interval_end, canonical_region in occupied_intervals:
+                    for a, b in _line_segments(interval_start, interval_end, profile.sample_step_mm):
+                        if abs(b - a) < profile.min_segment_length_mm:
+                            continue
+                        midpoint = (a + b) / 2.0
+                        x, y = (midpoint, line_coordinate) if direction_x else (line_coordinate, midpoint)
+                        region_name = canonical_region.region if canonical_region is not None else ("measurement_roi_tile" if selection.mode == "tile" else "measurement_roi")
+                        if canonical_region is not None:
+                            active_tool = canonical_region.tool
+                            if active_tool not in calibrations:
+                                raise CalibrationMismatchError(f"No accepted calibration is bound to canonical scene tool {active_tool}.")
+                        else:
+                            active_tool = _tool_for_sample(
+                                x_mm=x,
+                                y_mm=y,
+                                default_region=region_name,
+                                available_tools=calibrations,
+                                regions=regions,
+                                explicit_tool=tool,
+                            )
+                        selected_calibration = calibrations[active_tool]
+                        used_calibrations[active_tool] = selected_calibration
+                        pitch = selected_calibration.binding.pitch_mm
+                        source_position = selection.rail_sample_position(x, y, z_sample, tile_index=tile_index if selection.mode == "tile" else None)
+                        sampled_hu = selection.sample_hu(x, y, z_sample, tile_index=tile_index if selection.mode == "tile" else None)
+                        source_hu = canonical_region.target_hu if isinstance(selection, ModeledPrintSelection) and canonical_region is not None else sampled_hu
+                        target_hu = canonical_region.target_hu if canonical_region is not None else source_hu
+                        clipped_hu, widths, range_status = selected_calibration.map_hu(np.asarray([target_hu]), allow_clipping=allow_calibration_clipping)
+                        width = float(np.clip(widths[0], width_limit[0], width_limit[1]))
+                        local_start = (a, line_coordinate) if direction_x else (line_coordinate, a)
+                        local_end = (b, line_coordinate) if direction_x else (line_coordinate, b)
+                        extrusion, feedrate = _extrusion_and_feedrate(
+                            math.hypot(b - a, 0.0), width, selection.layer_height_mm, profile, selected_calibration.binding.effective_flow_mm3_s
+                        )
+                        if layer_index == 0:
+                            feedrate *= profile.first_layer_speed_scale
+                        feedrate = math.floor(feedrate * 1000.0) / 1000.0
+                        if range_status == "clipped":
+                            clipped_count += 1
+                            clipped_by_layer[str(layer_index)] = clipped_by_layer.get(str(layer_index), 0) + 1
+                            tile_key = str(tile_index if selection.mode == "tile" else 0)
+                            clipped_by_tile[tile_key] = clipped_by_tile.get(tile_key, 0) + 1
+                            clipped_by_region[region_name] = clipped_by_region.get(region_name, 0) + 1
+                        segments.append(
+                            ToolpathSegment(
+                                segment_index=len(segments),
+                                layer_index=layer_index,
+                                tile_index=tile_index if selection.mode == "tile" else None,
+                                start_xy_mm=(local_start[0] + offset_x, local_start[1] + offset_y),
+                                end_xy_mm=(local_end[0] + offset_x, local_end[1] + offset_y),
+                                z_mm=z_print,
+                                source_position_lps=source_position,
+                                source_hu=float(source_hu),
+                                target_hu=float(target_hu),
+                                clipped_hu=float(clipped_hu[0]),
+                                commanded_width_mm=width,
+                                effective_fill=float(width / pitch),
+                                feedrate_mm_min=float(feedrate),
+                                extrusion_mm=float(extrusion),
+                                tool=active_tool,
+                                material=selected_calibration.binding.material,
+                                calibration_id=selected_calibration.calibration_id,
+                                source_coordinate_frame="designer_scene_mm" if isinstance(selection, ModeledPrintSelection) else "patient_lps_mm",
+                                region=region_name,
+                                range_status=range_status,
+                            )
+                        )
             completed += 1
             if progress:
                 from .models import ProgressEvent
@@ -674,6 +732,7 @@ def generate_toolpath(
                 source_hu=float(marker_calibration.hu_range[0]), target_hu=float(marker_calibration.hu_range[0]), clipped_hu=float(marker_calibration.hu_range[0]),
                 commanded_width_mm=width, effective_fill=width / marker_calibration.binding.pitch_mm, feedrate_mm_min=float(feedrate), extrusion_mm=float(extrusion),
                 tool=marker_tool, material=marker_calibration.binding.material, calibration_id=marker_calibration.calibration_id, region=f"structural_{marker_type}", range_status="structural",
+                source_coordinate_frame="designer_scene_mm" if isinstance(selection, ModeledPrintSelection) else "patient_lps_mm",
             )
         )
         used_calibrations[marker_tool] = marker_calibration
@@ -720,6 +779,18 @@ def generate_toolpath(
         "mass_status": "available" if all(item["mass_g"] is not None for item in per_tool.values()) else "unavailable_material_density_not_bound",
         "source": "emitted_audited_segments",
     }
+    scene_to_print_transform: tuple[tuple[float, ...], ...] | None = None
+    if canonical is not None:
+        scene_to_print_transform = (
+            selection.manifest.source_to_print_transform
+            if isinstance(selection, ModeledPrintSelection)
+            else (
+                (1.0, 0.0, 0.0, selection.print_size_mm[0] / 2.0),
+                (0.0, 1.0, 0.0, selection.print_size_mm[1] / 2.0),
+                (0.0, 0.0, 1.0, selection.print_size_mm[2] / 2.0),
+                (0.0, 0.0, 0.0, 1.0),
+            )
+        )
     result = GeneratedToolpath(
         selection=selection,
         segments=tuple(segments),
@@ -738,6 +809,11 @@ def generate_toolpath(
             "estimated": estimate,
             "tool_change_count": tool_change_count,
             "preview_is_non_authoritative": True,
+            "scene_coordinate_frame": "designer_scene_mm",
+            "source_coordinate_frame": "designer_scene_mm" if isinstance(selection, ModeledPrintSelection) else "patient_lps_mm",
+            "scene_to_print_transform": scene_to_print_transform,
+            "canonical_scene_hash": canonical.source_hash if canonical is not None else None,
+            "scene_manifest": canonicalize(canonical_scene_manifest(dict(scene))) if canonical is not None and scene is not None else None,
             "clipping": {
                 "occurred": clipped_count > 0,
                 "sample_count": clipped_count,
@@ -1004,12 +1080,20 @@ def export_run_package(generated: GeneratedToolpath, directory: str | Path) -> d
     selection_path = target / "selection_manifest.json"
     transform_path = target / "source_to_print_transform.json"
     report_path = target / "run_report.json"
+    scene_path = target / "scene_manifest.json"
     audit = generated.audit()
     _write_json(selection_path, generated.selection.manifest.to_dict())
-    _write_json(transform_path, {"schema": "voxelweave.source-to-print-transform.v1", "matrix": generated.selection.manifest.source_to_print_transform})
+    _write_json(transform_path, {
+        "schema": "voxelweave.source-to-print-transform.v2",
+        "matrix": generated.selection.manifest.source_to_print_transform,
+        "tile_matrices": getattr(generated.selection.manifest, "tile_source_to_print_transforms", ()),
+    })
     report = {**generated.report, "gcode_sha256": generated.gcode_sha256, "preview_sha256": generated.preview_sha256, "audit": audit.to_dict()}
     _write_json(report_path, report)
     artifact_paths = [gcode_path, preview.path, trace_artifact.path, selection_path, transform_path, report_path]
+    if generated.report.get("scene_manifest") is not None:
+        _write_json(scene_path, {"schema": "voxelweave.canonical-scene-manifest.v1", "canonical_scene_hash": generated.report.get("canonical_scene_hash"), "coordinate_frame": generated.report.get("scene_coordinate_frame"), "scene": generated.report["scene_manifest"]})
+        artifact_paths.append(scene_path)
     hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(artifact_paths, key=lambda item: item.name)}
     hashes_path = target / "hashes.json"
     _write_json(hashes_path, {"schema": "voxelweave.run-hashes.v1", "files": hashes})

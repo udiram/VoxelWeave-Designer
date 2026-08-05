@@ -16,6 +16,7 @@ export type Operation =
   | "reverse_audit_gcode"
   | "export_run_package"
   | "verify_scan_back"
+  | "export_verification_report"
   | "cancel";
 
 export interface ControlEnvelope<P extends Record<string, unknown> = Record<string, unknown>> {

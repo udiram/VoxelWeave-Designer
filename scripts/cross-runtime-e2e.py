@@ -118,7 +118,7 @@ def run(output_dir: Path, sidecar: Path | None) -> dict[str, Any]:
             process,
             "cross-scene",
             "validate_scene",
-            {"scene": {"regions": [{"id": "lung", "owner": "T0:measurement"}]}},
+            {"scene": {"regions": [{"id": "lung", "kind": "box", "owner": "T0:measurement", "region": "measurement", "tool": "T0", "target_hu": 0, "geometry": {"kind": "box", "dimensions": [2, 3, 4]}}]}},
         )
         if not require_ok(scene, "cross-scene").get("passed") or scene_progress:
             raise AssertionError("scene validation did not return the expected bounded response")

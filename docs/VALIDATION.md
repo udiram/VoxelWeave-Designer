@@ -27,7 +27,7 @@ The following are not sufficient on their own:
 
 - a clean software audit;
 - an exact toolpath preview;
-- a successful G-code download or Prusa Connect upload;
+- a successful local G-code/run-package export;
 - a synthetic scan-back;
 - a low-resolution display or MPR screenshot;
 - a model's confidence or a release test pass.

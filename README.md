@@ -10,7 +10,7 @@ The product is a Tauri 2 application with a React and TypeScript interface, a Py
 2. **DICOM** — complete-series import, synchronized axial/sagittal/coronal/3D viewing, crop, and print selection.
 3. **Calibrate** — tool-, material-, scanner-, and reconstruction-specific rail-width-to-HU evidence.
 4. **Prepare** — exact toolpath preview, clipping, flow, bed, runtime, and safety checks.
-5. **Send** — local export and optional authenticated Prusa Connect upload; never automatic print start.
+5. **Send** — local, inspectable run-package export; never automatic print start.
 6. **Verify** — scan-back registration, HU comparison, provenance, reports, and research conclusions.
 
 The source-of-truth contracts are [PRODUCT.md](PRODUCT.md), [DESIGN.md](DESIGN.md), and the [desktop product contract](docs/desktop/PRODUCT_CONTRACT.md).

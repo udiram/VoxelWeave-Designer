@@ -12,7 +12,7 @@ Include the affected commit or release, platform, reproduction steps using synth
 
 - Secrets belong in the macOS Keychain, CI secret storage, or Railway secret storage. They must not be placed in project documents, browser storage, logs, or release evidence.
 - The Tauri sidecar exposes bounded, versioned operations. It must never become an arbitrary shell-execution bridge.
-- Prusa Connect credentials are optional, authenticated, and Keychain-backed. The application never starts a printer automatically.
+- This release stores no printer-service credentials and performs no printer upload. The application never starts a printer automatically.
 - Logs and exported evidence redact patient fields and should contain identifiers only when the operator has deliberately supplied a non-PHI run label.
 - The public site and release API should expose release metadata and checksums, not raw DICOM, patient data, signing material, or local filesystem paths.
 - Release evidence records whether signing and notarization happened; development prereleases must not imply notarization.

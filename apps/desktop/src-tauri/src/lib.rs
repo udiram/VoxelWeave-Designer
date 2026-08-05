@@ -29,6 +29,8 @@ struct SidecarManager {
     pending: Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>>,
     authorized_paths: Mutex<HashSet<PathBuf>>,
     cache_paths: Mutex<HashSet<PathBuf>>,
+    owned_cache_root: Mutex<Option<PathBuf>>,
+    owned_output_root: Mutex<Option<PathBuf>>,
 }
 
 impl Default for SidecarManager {
@@ -38,6 +40,8 @@ impl Default for SidecarManager {
             pending: Arc::new(Mutex::new(HashMap::new())),
             authorized_paths: Mutex::new(HashSet::new()),
             cache_paths: Mutex::new(HashSet::new()),
+            owned_cache_root: Mutex::new(None),
+            owned_output_root: Mutex::new(None),
         }
     }
 }
@@ -49,6 +53,28 @@ fn canonical_existing(path: &PathBuf) -> Result<PathBuf, String> {
     std::fs::canonicalize(path).map_err(|error| format!("cannot authorize {}: {error}", path.display()))
 }
 
+fn canonical_future_path(path: &PathBuf) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+    if path.exists() {
+        return std::fs::canonicalize(path)
+            .map_err(|error| format!("cannot resolve {}: {error}", path.display()));
+    }
+    let mut existing = path.as_path();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| format!("path has no existing ancestor: {}", path.display()))?;
+    }
+    let canonical_ancestor = std::fs::canonicalize(existing)
+        .map_err(|error| format!("cannot resolve {}: {error}", existing.display()))?;
+    let suffix = path
+        .strip_prefix(existing)
+        .map_err(|_| format!("cannot resolve future path {}", path.display()))?;
+    Ok(canonical_ancestor.join(suffix))
+}
+
 fn authorized_path(manager: &SidecarManager, requested: &str, allow_missing_target: bool) -> Result<PathBuf, String> {
     let raw = PathBuf::from(requested);
     if !raw.is_absolute() {
@@ -57,9 +83,7 @@ fn authorized_path(manager: &SidecarManager, requested: &str, allow_missing_targ
     let canonical = if raw.exists() {
         std::fs::canonicalize(&raw).map_err(|error| format!("cannot resolve {}: {error}", raw.display()))?
     } else if allow_missing_target {
-        let parent = raw.parent().ok_or_else(|| "path has no parent directory".to_string())?;
-        let parent = std::fs::canonicalize(parent).map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
-        parent.join(raw.file_name().ok_or_else(|| "path has no file name".to_string())?)
+        canonical_future_path(&raw)?
     } else {
         return Err(format!("path does not exist: {}", raw.display()));
     };
@@ -68,11 +92,60 @@ fn authorized_path(manager: &SidecarManager, requested: &str, allow_missing_targ
         return Ok(canonical);
     }
     drop(guard);
-    let cache_guard = manager.cache_paths.lock().map_err(|_| "cache path state is poisoned".to_string())?;
-    if cache_guard.iter().any(|root| canonical == *root || canonical.starts_with(root)) {
-        return Ok(canonical);
+    for root in [&manager.owned_cache_root, &manager.owned_output_root] {
+        let guard = root.lock().map_err(|_| "owned path state is poisoned".to_string())?;
+        if guard.as_ref().is_some_and(|value| canonical.starts_with(value)) {
+            return Ok(canonical);
+        }
     }
     Err(format!("path is outside the user-authorized scope: {}", raw.display()))
+}
+
+fn configure_owned_roots(app: &tauri::AppHandle, manager: &SidecarManager) -> Result<(), String> {
+    let cache = app.path().app_cache_dir().map_err(|error| format!("cannot locate app cache directory: {error}"))?;
+    let output = app.path().app_data_dir().map_err(|error| format!("cannot locate app data directory: {error}"))?;
+    std::fs::create_dir_all(&cache).map_err(|error| format!("cannot create app cache directory: {error}"))?;
+    std::fs::create_dir_all(&output).map_err(|error| format!("cannot create app data directory: {error}"))?;
+    *manager.owned_cache_root.lock().map_err(|_| "owned cache root state is poisoned".to_string())? = Some(std::fs::canonicalize(cache).map_err(|error| format!("cannot resolve app cache directory: {error}"))?);
+    *manager.owned_output_root.lock().map_err(|_| "owned output root state is poisoned".to_string())? = Some(std::fs::canonicalize(output).map_err(|error| format!("cannot resolve app data directory: {error}"))?);
+    Ok(())
+}
+
+fn register_cache_path(manager: &SidecarManager, requested: &str) -> Result<(), String> {
+    let canonical = canonical_future_path(&PathBuf::from(requested))?;
+    let root_guard = manager.owned_cache_root.lock().map_err(|_| "owned cache root state is poisoned".to_string())?;
+    let Some(root) = root_guard.as_ref() else { return Err("owned cache root is unavailable".to_string()); };
+    let relative = canonical.strip_prefix(root).map_err(|_| "cache artifact is outside the app-owned cache root".to_string())?;
+    let parts = relative.components().map(|item| item.as_os_str().to_owned()).collect::<Vec<_>>();
+    if parts.len() < 2 || parts[0] != "sessions" {
+        return Err("cache artifacts must be scoped to an app-owned sessions/<project> directory".to_string());
+    }
+    let session = root.join(&parts[0]).join(&parts[1]);
+    drop(root_guard);
+    manager.cache_paths.lock().map_err(|_| "cache path state is poisoned".to_string())?.insert(session);
+    Ok(())
+}
+
+fn register_payload_cache_paths(manager: &SidecarManager, value: &Value) -> Result<(), String> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if matches!(key.as_str(), "directory" | "output_path") {
+                    if let Some(path) = child.as_str() {
+                        let candidate = canonical_future_path(&PathBuf::from(path))?;
+                        let root = manager.owned_cache_root.lock().map_err(|_| "owned cache root state is poisoned".to_string())?;
+                        let is_cache = root.as_ref().is_some_and(|value| candidate.starts_with(value));
+                        drop(root);
+                        if is_cache { register_cache_path(manager, path)?; }
+                    }
+                }
+                register_payload_cache_paths(manager, child)?;
+            }
+        }
+        Value::Array(items) => for child in items { register_payload_cache_paths(manager, child)?; },
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
 }
 
 fn authorize_path_impl(manager: &SidecarManager, path: &str) -> Result<String, String> {
@@ -169,6 +242,7 @@ fn validate_control_request(request: &Value) -> Result<(String, String), String>
         "reverse_audit_gcode",
         "export_run_package",
         "verify_scan_back",
+        "export_verification_report",
         "cancel",
     ];
     if !supported.contains(&operation.as_str()) {
@@ -419,13 +493,11 @@ fn sidecar_request(
     state: State<'_, SidecarManager>,
     request: Value,
 ) -> Result<Value, String> {
+    configure_owned_roots(&app, &state)?;
     let (request_id, _operation) = validate_control_request(&request)?;
     if let Some(payload) = request.get("payload") {
         authorize_payload_paths(&state, payload, "payload")?;
-        if let Some(directory) = payload.get("directory").and_then(Value::as_str) {
-            let path = authorized_path(&state, directory, true)?;
-            if let Ok(mut cache_paths) = state.cache_paths.lock() { cache_paths.insert(path); }
-        }
+        register_payload_cache_paths(&state, payload)?;
     }
     let process = ensure_process(&app, &state)?;
     let (sender, receiver) = mpsc::channel();
@@ -570,4 +642,64 @@ pub fn run() {
             let _ = shutdown_sidecar_process(&state);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "voxelweave-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos()
+        ))
+    }
+
+    #[test]
+    fn cleanup_removes_only_registered_app_owned_session() {
+        let root = test_root("cleanup-scope");
+        let cache_root = root.join("owned-cache");
+        let output_root = root.join("owned-output");
+        let user_root = root.join("user-source");
+        let session = cache_root.join("sessions/project-a");
+        std::fs::create_dir_all(&session).expect("create session");
+        std::fs::create_dir_all(&output_root).expect("create output");
+        std::fs::create_dir_all(&user_root).expect("create source");
+        std::fs::write(session.join("cache.bin"), b"cache").expect("write cache");
+        std::fs::write(user_root.join("sentinel.dcm"), b"source").expect("write source");
+        std::fs::write(output_root.join("run-package.zip"), b"export").expect("write export");
+        let manager = SidecarManager::default();
+        *manager.owned_cache_root.lock().expect("cache root") = Some(std::fs::canonicalize(&cache_root).expect("canonical cache"));
+        *manager.owned_output_root.lock().expect("output root") = Some(std::fs::canonicalize(&output_root).expect("canonical output"));
+        register_cache_path(&manager, session.join("cache.bin").to_str().expect("path")).expect("register session");
+        shutdown_sidecar_process(&manager).expect("shutdown");
+        assert!(!session.exists());
+        assert!(user_root.join("sentinel.dcm").exists());
+        assert!(output_root.join("run-package.zip").exists());
+        std::fs::remove_dir_all(&root).expect("remove test root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_registration_rejects_symlink_escape_and_non_owned_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("cache-escape");
+        let cache_root = root.join("owned-cache");
+        let output_root = root.join("owned-output");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(cache_root.join("sessions/project-a")).expect("create cache");
+        std::fs::create_dir_all(&output_root).expect("create output");
+        std::fs::create_dir_all(&outside).expect("create outside");
+        symlink(&outside, cache_root.join("sessions/project-a/escape")).expect("create symlink");
+        let manager = SidecarManager::default();
+        *manager.owned_cache_root.lock().expect("cache root") = Some(std::fs::canonicalize(&cache_root).expect("canonical cache"));
+        *manager.owned_output_root.lock().expect("output root") = Some(std::fs::canonicalize(&output_root).expect("canonical output"));
+        assert!(register_cache_path(&manager, outside.join("user-data").to_str().expect("outside path")).is_err());
+        assert!(register_cache_path(&manager, cache_root.join("sessions/project-a/escape").to_str().expect("escape path")).is_err());
+        assert!(manager.cache_paths.lock().expect("cache paths").is_empty());
+        std::fs::remove_dir_all(&root).expect("remove test root");
+    }
 }

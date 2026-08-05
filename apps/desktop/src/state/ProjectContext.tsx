@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, type PropsWithChildren } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { emptyProjectDocument, syntheticProjectDocument } from "../data/fixtures";
 import { createSidecarClient, type SidecarClient } from "../services/sidecarClient";
-import { isNativeRuntime, openNativeProject, recoverProject, saveNativeProject, saveProject } from "../services/projectDocument";
+import { authorizeNativePath, isNativeRuntime, openNativeProject, recoverProject, saveNativeProject, saveProject } from "../services/projectDocument";
 import type { ProjectAction, ProjectDocument, ProjectState } from "../types";
 import { createInitialProjectState, projectReducer } from "./projectState";
 
@@ -51,6 +52,20 @@ export function ProjectProvider({ children }: PropsWithChildren) {
       return;
     }
     const project = await openNativeProject(path);
+    const linkedPaths = [...new Set([
+      ...(project.source.inputPaths ?? []),
+      project.source.path,
+      ...project.scene.map((object) => object.sourcePath),
+      project.verify.sourcePath,
+    ].filter((value): value is string => Boolean(value) && !value!.startsWith("synthetic://")))];
+    if (linkedPaths.length) {
+      const approved = await confirm(
+        `This project references ${linkedPaths.length} local source${linkedPaths.length === 1 ? "" : "s"}. Reauthorize those DICOM/mesh paths for this session?`,
+        { title: "Reauthorize linked research sources", kind: "warning", okLabel: "Reauthorize", cancelLabel: "Cancel open" },
+      );
+      if (!approved) throw new Error("Project open canceled before linked source authorization.");
+      await Promise.all(linkedPaths.map((linkedPath) => authorizeNativePath(linkedPath)));
+    }
     rawDispatch({ type: "OPEN_PROJECT", project, path });
   }, [native]);
 

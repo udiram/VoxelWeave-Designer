@@ -18,7 +18,7 @@ The app joins six explicit workspaces:
 - DICOM — complete-series import, synchronized axial/sagittal/coronal/3D viewing, crop and print selection.
 - Calibrate — tool/material/scanner/reconstruction-specific rail-width-to-HU evidence.
 - Prepare — exact toolpath preview, clipping, flow, bed, runtime, and safety checks.
-- Send — local export and optional authenticated Prusa Connect upload; never automatic print start.
+- Send — local, inspectable run-package export; never automatic print start.
 - Verify — scan-back registration, HU comparison, provenance, reports, and research conclusions.
 
 ## Target Users
@@ -53,12 +53,12 @@ Move from a complete DICOM series or modeled solid to a deterministic, inspectab
 4. Select axial, sagittal, or coronal single-plane, continuous-range, or tile-range output with a physical crop and scale.
 5. Bind accepted tool/material calibrations and resolve any clipping or resolution warnings.
 6. Generate and reverse-audit exact multi-tool G-code plus manifests, transforms, hashes, and a toolpath trace.
-7. Export locally or upload to Prusa Connect. Printing remains an attended external action.
+7. Export the local run package. Printing remains an attended external action.
 8. Import scan-back data, register it with explicit confidence, compare results, and export a versioned verification package.
 
 ## Scope Boundaries
 
-In v1: Apple Silicon macOS 14+, Tauri 2, React 19, TypeScript, Three.js/React Three Fiber, WebGL2, Manifold WASM, Python Manifold, the existing VoxelWeave scientific engine, complete DICOM series, four-pane MPR/3D, orthogonal printing, continuous and tiled output, designer primitives/imports/CSG, multi-tool calibration and G-code, optional Prusa Connect upload, and scan-back verification.
+In v1: Apple Silicon macOS 14+, Tauri 2, React 19, TypeScript, Three.js/React Three Fiber, WebGL2, Manifold WASM, Python Manifold, the existing VoxelWeave scientific engine, complete DICOM series, four-pane MPR/3D, orthogonal printing, continuous and tiled output, designer primitives/imports/CSG, multi-tool calibration and G-code, local run-package export, and scan-back verification.
 
 Out of v1: Intel or non-macOS builds, oblique printing, curved planar reformations, diagnostic interpretation, automatic anatomical segmentation, sculpting, STEP/B-rep CAD, automatic printer start, silent calibration extrapolation, and scientific conversion from preview data.
 
@@ -101,4 +101,3 @@ Use plain, direct verbs: Import series, Build volume cache, Select slab, Generat
 - Automated unit, integration, accessibility, responsive, desktop, packaging, and end-to-end tests pass.
 - The public Railway site explains the product, exposes current release downloads and checksums, and clearly states research-only limits.
 - GitHub contains reproducible source, CI, release automation, documentation, and downloadable Apple Silicon artifacts.
-

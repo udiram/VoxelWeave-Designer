@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { appCacheDir, appDataDir } from "@tauri-apps/api/path";
 import type {
   DicomSelectionResult,
   DicomSource,
@@ -11,6 +12,7 @@ import type {
   Vec3,
   VerifyScanBackResult,
 } from "../types";
+import { selectionOutputDimensions } from "../state/projectState";
 
 export type SidecarOperation =
   | "inspect_dicom_source"
@@ -26,6 +28,7 @@ export type SidecarOperation =
   | "reverse_audit_gcode"
   | "export_run_package"
   | "verify_scan_back"
+  | "export_verification_report"
   | "cancel";
 
 export type SidecarMode = "native" | "synthetic-browser-test";
@@ -131,20 +134,19 @@ function sourcePayload(project: ProjectDocument): Record<string, unknown> {
 
 function sourceIdentity(project: ProjectDocument): string {
   const inputs = project.source.inputPaths?.length ? project.source.inputPaths : [requireSource(project)];
-  return JSON.stringify(inputs);
+  return JSON.stringify({ inputs, seriesUid: project.source.seriesUid });
 }
 
-function nativeCacheDirectory(project: ProjectDocument): string {
-  const source = requireSource(project).replace(/[\\/]+$/, "");
-  const configured = project.source.cache.directory;
-  if (configured && (/^\//.test(configured) || /^[A-Za-z]:[\\/]/.test(configured))) return configured.replace(/[\\/]+$/, "");
-  const isFileInput = (project.source.inputPaths?.length ?? 0) > 1 || /\.(?:zip|dcm|dicom)$/i.test(source);
-  const sourceDirectory = isFileInput ? source.replace(/[\\/][^\\/]+$/, "") : source;
-  if (!sourceDirectory || sourceDirectory === source) {
-    if (isFileInput) throw new Error("The selected DICOM file has no writable parent directory.");
-    return `${source}/.voxelweave-cache`;
-  }
-  return `${sourceDirectory}/.voxelweave-cache`;
+function safeProjectDirectory(project: ProjectDocument): string {
+  return project.projectId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "") || "untitled-project";
+}
+
+async function nativeCacheDirectory(project: ProjectDocument): Promise<string> {
+  return `${(await appCacheDir()).replace(/[\\/]+$/, "")}/sessions/${safeProjectDirectory(project)}`;
+}
+
+async function nativeExportDirectory(project: ProjectDocument): Promise<string> {
+  return `${(await appDataDir()).replace(/[\\/]+$/, "")}/exports/${safeProjectDirectory(project)}`;
 }
 
 function nativeArtifactPath(path: unknown, directory: string): string | undefined {
@@ -180,12 +182,19 @@ function calibrationPayload(project: ProjectDocument): Array<Record<string, unkn
 
 function scenePayload(project: ProjectDocument): Record<string, unknown> {
   return {
+    coordinate_frame: "designer_scene_mm",
     regions: project.scene.map((object) => {
-      const dimensions = object.dimensionsMm ?? object.transform.scale;
+      const dimensions = object.sourceDimensionsMm ?? object.dimensionsMm ?? object.transform.scale;
+      const targetDimensions = object.dimensionsMm ?? object.transform.scale;
       const bounds = {
-        x: [object.transform.position.x - dimensions.x / 2, object.transform.position.x + dimensions.x / 2],
-        y: [object.transform.position.y - dimensions.y / 2, object.transform.position.y + dimensions.y / 2],
+        x: [object.transform.position.x - targetDimensions.x / 2, object.transform.position.x + targetDimensions.x / 2],
+        y: [object.transform.position.y - targetDimensions.y / 2, object.transform.position.y + targetDimensions.y / 2],
       };
+      const calibration = project.calibrations.find((profile) => profile.accepted && profile.tool === object.tool);
+      const calibratedTarget = calibration?.huSamples[Math.floor(calibration.huSamples.length / 2)]?.targetHu;
+      const targetHu = object.targetHu ?? calibratedTarget;
+      const usesScopedMeshSource = object.kind !== "dicom" && Boolean(object.sourcePath && !object.sourcePath.startsWith("synthetic://"));
+      if (object.kind !== "dicom" && !Number.isFinite(targetHu)) throw new Error(`Scene object ${object.name} requires a finite modeled target HU bound to an accepted ${object.tool} calibration.`);
       return {
         id: object.id,
         kind: object.kind,
@@ -193,18 +202,23 @@ function scenePayload(project: ProjectDocument): Record<string, unknown> {
         bounds_mm: bounds,
         transform: object.transform,
         visible: object.visible,
+        region: object.region,
+        tool: object.tool,
+        target_hu: object.kind === "dicom" ? undefined : targetHu,
         geometry: {
           kind: object.kind === "polygon-prism" ? "polygon_prism" : object.kind,
           dimensions,
-          vertices: object.vertices,
-          faces: object.faces,
+          vertices: usesScopedMeshSource ? undefined : object.vertices,
+          faces: usesScopedMeshSource ? undefined : object.faces,
           boolean_operands: object.boolean?.operands ?? [],
-          boolean_operation: object.boolean?.operation,
+          boolean_operation: object.boolean?.operation === "intersect" ? "intersection" : object.boolean?.operation,
+          polygon_points: object.polygonPoints,
+          polygon_sides: object.polygonSides,
         },
-        dimensions_mm: object.dimensionsMm,
+        dimensions_mm: object.dimensionsMm ?? object.transform.scale,
         source_path: object.kind === "dicom" && (!object.sourcePath || object.sourcePath.startsWith("synthetic://")) ? project.source.path : object.sourcePath,
         boolean_operands: object.boolean?.operands ?? [],
-        boolean_operation: object.boolean?.operation,
+        boolean_operation: object.boolean?.operation === "intersect" ? "intersection" : object.boolean?.operation,
       };
     }),
   };
@@ -300,7 +314,7 @@ export class NativeSidecarClient implements SidecarClient {
 
   async buildVolumeCache(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ directory?: string; volumePath?: string; previewPath?: string; sourceHash?: string; dimensions?: { x: number; y: number; z: number }; spacing?: Vec3; origin?: Vec3; directionLps?: number[][] }> {
     await this.ensureSelected(project, onProgress);
-    const directory = nativeCacheDirectory(project);
+    const directory = await nativeCacheDirectory(project);
     if (isTauriRuntime()) await invoke("authorize_path", { path: directory });
     const result = await this.request<Record<string, unknown>>("build_volume_cache", { directory }, onProgress);
     const scientific = result.scientific_source as Record<string, unknown> | undefined;
@@ -335,17 +349,17 @@ export class NativeSidecarClient implements SidecarClient {
         : undefined,
       output_shape_yx: outputShape,
       method: project.selection.resamplingMethod === "nearest" ? "nearest" : "linear",
-      output_path: `${nativeCacheDirectory(project)}/mpr-${orientation}.bin`,
+      output_path: `${await nativeCacheDirectory(project)}/mpr-${orientation}.bin`,
     }, onProgress);
     const plane = (result.plane as Record<string, unknown> | undefined) ?? result;
     const artifact = result.artifact as Record<string, unknown> | undefined;
-    const directory = nativeCacheDirectory(project);
+    const directory = await nativeCacheDirectory(project);
     return { plane: String(plane.plane ?? orientation), source: "full-resolution signed-HU cache", sourceHash: String(plane.source_hash ?? ""), artifactPath: nativeArtifactPath(artifact?.path, directory), shapeYx: Array.isArray(plane.shape_yx) ? [Number(plane.shape_yx[0]), Number(plane.shape_yx[1])] : outputShape, coordinateMm: Number(plane.coordinate_mm ?? 0), spacingMm: Array.isArray(plane.spacing_mm) ? [Number(plane.spacing_mm[0]), Number(plane.spacing_mm[1])] : undefined };
   }
 
   async requestVolumePreview(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VolumePreviewResult> {
     await this.ensureSelected(project, onProgress);
-    const directory = nativeCacheDirectory(project);
+    const directory = await nativeCacheDirectory(project);
     const result = await this.request<Record<string, unknown>>("request_volume_preview", { ...sourcePayload(project), max_dimension: 128, output_path: `${directory}/volume-preview.bin` }, onProgress);
     const preview = (result.preview as Record<string, unknown> | undefined) ?? result;
     const artifact = result.artifact as Record<string, unknown> | undefined;
@@ -382,7 +396,8 @@ export class NativeSidecarClient implements SidecarClient {
         },
       };
     });
-    const structuralOwner = structuralRegions[0]?.owner;
+    const structuralOwner = structuralRegions[0]?.owner ?? `${calibration?.tool ?? "T0"}:structure`;
+    const outputDimensions = selectionOutputDimensions(project.source, project.selection);
     const result = await this.request<Record<string, unknown>>("create_print_selection", {
       plane: project.selection.orientation,
       mode,
@@ -391,8 +406,8 @@ export class NativeSidecarClient implements SidecarClient {
       end_index: project.selection.end,
       crop_min_lps: [project.selection.crop.x[0], project.selection.crop.y[0], project.selection.crop.z[0]],
       crop_max_lps: [project.selection.crop.x[1], project.selection.crop.y[1], project.selection.crop.z[1]],
-      thickness_mm: mode === "single" ? (project.selection.tileThicknessMm ?? project.selection.thicknessMm) : project.selection.thicknessMm,
-      print_size_mm: project.selection.outputDimensionsMm ? [project.selection.outputDimensionsMm.x, project.selection.outputDimensionsMm.y, project.selection.outputDimensionsMm.z] : undefined,
+      thickness_mm: mode === "single" || mode === "tile" ? outputDimensions.z : undefined,
+      print_size_mm: [outputDimensions.x, outputDimensions.y, outputDimensions.z],
       layer_height_mm: calibration?.layerHeightMm ?? 0.2,
       stride: project.selection.stride,
       resampling: project.selection.resamplingMethod ?? "trilinear",
@@ -414,7 +429,7 @@ export class NativeSidecarClient implements SidecarClient {
     const matrix = Array.isArray(result.source_to_print_transform) ? result.source_to_print_transform.flatMap((row) => Array.isArray(row) ? row.map(Number) : []) : undefined;
     const selectionId = String(result.selection_id ?? result.selectionId ?? `native-${String(result.source_hash ?? "selection").slice(0, 12)}`);
     const transformHash = String(result.transform_hash ?? result.transformHash ?? `sha256:${String(result.source_hash ?? "unknown")}`);
-    return { selectionId, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: Number(printSize[2] ?? project.selection.thicknessMm), transformHash, sourceToPrintTransform: matrix };
+    return { selectionId, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: Number(printSize[2] ?? outputDimensions.z), transformHash, sourceToPrintTransform: matrix, outputDimensionsMm: printSize.length === 3 ? { x: printSize[0], y: printSize[1], z: printSize[2] } : outputDimensions };
   }
 
   async validateScene(project: ProjectDocument): Promise<{ valid: boolean; messages: string[] }> {
@@ -423,7 +438,13 @@ export class NativeSidecarClient implements SidecarClient {
   }
 
   async generateToolpath(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ToolpathResult> {
-    await this.ensureSelected(project, onProgress);
+    const hasDicomSource = Boolean(project.source.path);
+    const hasModeledSolid = project.scene.some((object) => object.visible && object.kind !== "dicom");
+    if (hasDicomSource) {
+      if (!project.selection.created) throw new Error("Create the persisted DICOM print selection before generation.");
+      await this.createPrintSelection(project, onProgress);
+    }
+    else if (!hasModeledSolid) throw new Error("Add a modeled solid or create a DICOM print selection before generation.");
     const calibration = project.calibrations.find((profile) => profile.id === project.selection.calibrationId) ?? project.calibrations.find((profile) => profile.accepted);
     if (!calibration?.accepted) throw new Error("Generation requires one explicitly selected accepted calibration.");
     const acceptedProfiles = project.calibrations.filter((profile) => profile.accepted);
@@ -436,9 +457,10 @@ export class NativeSidecarClient implements SidecarClient {
       tool: acceptedProfiles.length === 1 ? acceptedProfiles[0].tool : undefined,
       tool_bindings: toolBindings,
       region_owners: regionOwners,
+      generation_source: hasDicomSource ? "dicom_selection" : "modeled_scene",
       allow_calibration_clipping: project.toolpath.clippingAcknowledged,
       acknowledge_calibration_clipping: project.toolpath.clippingAcknowledged,
-      profile: { printer: project.calibrations.find((profile) => profile.accepted)?.printer ?? "Prusa XL", sample_step_mm: project.source.spacing.x },
+      profile: { printer: project.calibrations.find((profile) => profile.accepted)?.printer ?? "Prusa XL", sample_step_mm: project.source.spacing.x > 0 ? project.source.spacing.x : Math.min(...acceptedProfiles.map((profile) => profile.pitchMm ?? 0.5)) },
     }, onProgress);
     const estimate = result.estimated ?? result.report?.estimated;
     if (!estimate) throw new Error("Native sidecar did not return measured run estimates.");
@@ -460,7 +482,7 @@ export class NativeSidecarClient implements SidecarClient {
   }
 
   async exportRunPackage(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ExportPackageResult> {
-    const result = await this.request<{ files: string[]; hashes: Record<string, string>; package_name?: string; package_path?: string; directory?: string }>("export_run_package", { directory: `${nativeCacheDirectory(project)}/run-package`, run_id: project.toolpath.runId }, onProgress);
+    const result = await this.request<{ files: string[]; hashes: Record<string, string>; package_name?: string; package_path?: string; directory?: string }>("export_run_package", { directory: `${await nativeExportDirectory(project)}/run-package`, run_id: project.toolpath.runId }, onProgress);
     if (!result.package_name && !result.package_path && !result.directory) throw new Error("Native sidecar export omitted its exact package identity.");
     return { packageName: result.package_name ?? result.package_path ?? result.directory ?? "run-package", packageDirectory: result.package_path ?? result.directory, exportHash: `sha256:${result.hashes?.["hashes.json"] ?? "unknown"}`, files: result.files ?? [] };
   }
@@ -469,13 +491,13 @@ export class NativeSidecarClient implements SidecarClient {
     await this.ensureSelected(project, onProgress);
     const source = project.verify.sourcePath;
     if (!source || source.startsWith("synthetic://")) throw new Error("Choose a local scan-back folder before verification.");
-    const result = await this.request<{ registration_method: string; registration_confidence: number; mae_hu: number; rmse_hu: number; p95_abs_hu?: number; p95_absolute_error_hu?: number; compared_voxel_count: number }>("verify_scan_back", { scan_back_source: source, registration_method: project.verify.registrationMethod === "fiducial rigid" ? "geometry_only" : project.verify.registrationMethod === "landmark rigid" ? "manual_translation" : "identity", registration_confidence: project.verify.confidence === "high" ? 1 : project.verify.confidence === "medium" ? 0.7 : 0.3, hu_gamma_tolerance_hu: 40, expected_source_hash: project.source.sourceHash }, onProgress);
-    return { evidenceName: source.split(/[\\/]/).pop() ?? "scan-back", registrationMethod: project.verify.registrationMethod, confidence: result.registration_confidence >= 0.9 ? "high" : result.registration_confidence >= 0.5 ? "medium" : "low", comparison: { meanAbsoluteHu: result.mae_hu, rmseHu: result.rmse_hu, p95AbsoluteHu: result.p95_abs_hu ?? result.p95_absolute_error_hu, registeredVoxels: result.compared_voxel_count } };
+    const result = await this.request<{ registration_method: string; registration_confidence: number; translation_voxel_zyx: number[]; source_hash: string; scan_back_hash: string; mae_hu: number; rmse_hu: number; p95_abs_hu?: number; p95_absolute_error_hu?: number; compared_voxel_count: number; correlation?: number | null; hu_gamma_pass_percent: number; hu_gamma_tolerance_hu: number; physical_fidelity_status: string; warnings: string[]; dose_gamma: "not_used_hu_gamma_is_not_dose_gamma" }>("verify_scan_back", { scan_back_source: source, registration_method: project.verify.registrationMethod === "fiducial rigid" ? "geometry_only" : project.verify.registrationMethod === "landmark rigid" ? "manual_translation" : "identity", registration_confidence: project.verify.confidence === "high" ? 1 : project.verify.confidence === "medium" ? 0.7 : 0.3, hu_gamma_tolerance_hu: 40, expected_source_hash: project.source.sourceHash }, onProgress);
+    return { evidenceName: source.split(/[\\/]/).pop() ?? "scan-back", registrationMethod: project.verify.registrationMethod, confidence: result.registration_confidence >= 0.9 ? "high" : result.registration_confidence >= 0.5 ? "medium" : "low", comparison: { meanAbsoluteHu: result.mae_hu, rmseHu: result.rmse_hu, p95AbsoluteHu: result.p95_abs_hu ?? result.p95_absolute_error_hu, registeredVoxels: result.compared_voxel_count }, provenance: { sourceHash: result.source_hash, scanBackHash: result.scan_back_hash, translationVoxelZyx: [Number(result.translation_voxel_zyx[0]), Number(result.translation_voxel_zyx[1]), Number(result.translation_voxel_zyx[2])], correlation: result.correlation ?? undefined, huGammaPassPercent: result.hu_gamma_pass_percent, huGammaToleranceHu: result.hu_gamma_tolerance_hu, physicalFidelityStatus: result.physical_fidelity_status, warnings: result.warnings, doseGamma: result.dose_gamma } };
   }
 
   async exportVerificationReport(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; packageDirectory?: string; exportHash: string; files: string[] }> {
-    const directory = `${nativeCacheDirectory(project)}/verification-report`;
-    const result = await this.request<{ files: string[]; hashes: Record<string, string>; report_path?: string; package_name?: string; package_path?: string; directory?: string }>("export_run_package", { directory, run_id: project.toolpath.runId, include_verification_report: true, verification: project.verify }, onProgress);
+    const directory = `${await nativeExportDirectory(project)}/verification-report`;
+    const result = await this.request<{ files: string[]; hashes: Record<string, string>; report_path?: string; package_name?: string; package_path?: string; directory?: string }>("export_verification_report", { directory, run_id: project.toolpath.runId }, onProgress);
     if (!result.package_name && !result.package_path && !result.directory) throw new Error("Native sidecar verification export omitted its exact package identity.");
     return { reportPath: nativeArtifactPath(result.report_path, directory), packageName: result.package_name ?? result.package_path ?? result.directory ?? "verification-report", packageDirectory: result.package_path ?? result.directory, exportHash: `sha256:${result.hashes?.["hashes.json"] ?? "unknown"}`, files: result.files ?? [] };
   }
@@ -503,12 +525,12 @@ export class DeterministicSidecarClient implements SidecarClient {
   async requestVolumePreview(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VolumePreviewResult> { emitProgress("request_volume_preview", onProgress, [["Refine preview volume", 1]]); return { resolution: project.source.cache.preview, source: "preview texture only", shapeZyx: [64, 64, 64] }; }
   async sampleVoxel(_project: ProjectDocument, coordinate: { x: number; y: number; z: number }): Promise<{ hu: number; coordinate: typeof coordinate }> { return { hu: Math.round(-782 + coordinate.x * 0.4 + coordinate.y * 0.18 + coordinate.z * 0.6), coordinate }; }
   async calculateHistogram(project: ProjectDocument): Promise<{ bins: number[]; source: string }> { return { bins: [-990, -820, -740, -410, 30, 1200], source: project.source.cache.scientificSource }; }
-  async createPrintSelection(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomSelectionResult> { emitProgress("create_print_selection", onProgress, [["Lock physical crop", 0.35], ["Build source-to-print transform", 1]]); return { selectionId: `${project.projectId}-selection-001`, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: project.selection.thicknessMm, transformHash: "sha256:test-selection", sourceToPrintTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }; }
+  async createPrintSelection(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<DicomSelectionResult> { emitProgress("create_print_selection", onProgress, [["Lock physical crop", 0.35], ["Build source-to-print transform", 1]]); const outputDimensionsMm = selectionOutputDimensions(project.source, project.selection); return { selectionId: `${project.projectId}-selection-001`, sourceResolution: `${project.source.dimensions.x} × ${project.source.dimensions.y} × ${project.source.dimensions.z}`, physicalThicknessMm: outputDimensionsMm.z, outputDimensionsMm, transformHash: "sha256:test-selection", sourceToPrintTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }; }
   async validateScene(project: ProjectDocument): Promise<{ valid: boolean; messages: string[] }> { return { valid: project.scene.some((object) => object.visible), messages: ["Controlled test adapter scene validation", "Tool ownership resolved"] }; }
   async generateToolpath(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ToolpathResult> { emitProgress("generate_toolpath", onProgress, [["Sample calibrated rail field", 0.3], ["Emit alternating roads", 0.72], ["Preview ready", 1]]); return { runId: "run-test-adapter", segmentCount: 18432, clippingPercent: project.toolpath.clippingPercent, estimate: project.toolpath.estimated }; }
   async reverseAuditGcode(project: ProjectDocument): Promise<{ passed: boolean; checks: string[] }> { return { passed: project.toolpath.clippingAcknowledged, checks: ["Controlled adapter coordinates match", "Tools and feedrates match", "Bounds match"] }; }
   async exportRunPackage(_project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<ExportPackageResult> { emitProgress("export_run_package", onProgress, [["Write G-code and manifests", 0.45], ["Hash run artifacts", 0.8], ["Package ready", 1]]); return { packageName: "lung-phantom-study_run-vw-demo-0001.zip", packageDirectory: "synthetic://run-package", exportHash: "sha256:test-package", files: ["toolpath.gcode", "toolpath_preview.bin", "toolpath_trace.bin", "selection_manifest.json", "source_to_print_transform.json", "run_report.json", "hashes.json"] }; }
-  async verifyScanBack(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VerifyScanBackResult> { emitProgress("verify_scan_back", onProgress, [["Register scan-back evidence", 0.55], ["Compare signed HU samples", 1]]); return { evidenceName: project.verify.sourcePath?.split(/[\\/]/).pop() ?? "scan-back_lung-phantom_2026-08-04.tiff", registrationMethod: "landmark rigid", confidence: "high", comparison: { meanAbsoluteHu: 38, rmseHu: 64, p95AbsoluteHu: 112, registeredVoxels: 482_104 } }; }
+  async verifyScanBack(project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<VerifyScanBackResult> { emitProgress("verify_scan_back", onProgress, [["Register scan-back evidence", 0.55], ["Compare signed HU samples", 1]]); return { evidenceName: project.verify.sourcePath?.split(/[\\/]/).pop() ?? "scan-back_lung-phantom_2026-08-04.tiff", registrationMethod: "landmark rigid", confidence: "high", comparison: { meanAbsoluteHu: 38, rmseHu: 64, p95AbsoluteHu: 112, registeredVoxels: 482_104 }, provenance: { sourceHash: "sha256:test-source", scanBackHash: "sha256:test-scan-back", translationVoxelZyx: [0, 0, 0], correlation: 0.99, huGammaPassPercent: 96.4, huGammaToleranceHu: 40, physicalFidelityStatus: "evidence_recorded_not_established", warnings: ["Controlled browser-test evidence only."], doseGamma: "not_used_hu_gamma_is_not_dose_gamma" } }; }
   async exportVerificationReport(_project: ProjectDocument, onProgress?: (event: ProgressEvent) => void): Promise<{ reportPath?: string; packageName: string; packageDirectory?: string; exportHash: string; files: string[] }> { emitProgress("export_run_package", onProgress, [["Write verification report", 0.5], ["Hash report artifacts", 1]]); return { packageName: "test-adapter-verification-report", packageDirectory: "synthetic://verification-report", exportHash: "sha256:test-report", files: ["verification-report.json", "provenance.json"] }; }
   async cancel(_requestId: string): Promise<void> { /* synchronous adapter */ }
 }

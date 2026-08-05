@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { unzipSync } from "fflate";
 import { useProject } from "../../state/ProjectContext";
-import { Button, Disclosure, FieldRow, IconButton, SelectField, SectionHeading, StatusBadge } from "../../components/ui";
+import { Button, Disclosure, FieldRow, IconButton, NumberField, SelectField, SectionHeading, StatusBadge } from "../../components/ui";
 import { Icon } from "../../components/icons";
 import { DesignViewport } from "../../components/visuals";
 import { AppStatusBar, RailHeader } from "../shell/Shell";
@@ -44,18 +44,67 @@ function parseStl(bytes: Uint8Array): SolidMesh {
   return { vertices, faces, dimensionsMm: meshDimensions(vertices) };
 }
 
-function parse3mf(bytes: Uint8Array): SolidMesh {
+const identity3mfTransform = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+
+function parse3mfTransform(value: string | null): number[] {
+  if (!value) return identity3mfTransform;
+  const transform = value.trim().split(/\s+/).map(Number);
+  if (transform.length !== 12 || transform.some((item) => !Number.isFinite(item))) throw new Error("3MF transform must contain 12 finite values");
+  return transform;
+}
+
+function apply3mfTransform(vertex: number[], transform: number[]): number[] {
+  const [x, y, z] = vertex;
+  return [
+    x * transform[0] + y * transform[3] + z * transform[6] + transform[9],
+    x * transform[1] + y * transform[4] + z * transform[7] + transform[10],
+    x * transform[2] + y * transform[5] + z * transform[8] + transform[11],
+  ];
+}
+
+export function parse3mf(bytes: Uint8Array): SolidMesh {
   const files = unzipSync(bytes);
   const modelName = Object.keys(files).find((name) => /(^|\/)3dmodel\.model$/i.test(name));
   if (!modelName) throw new Error("3MF archive does not contain 3D/3dmodel.model");
   const xml = new DOMParser().parseFromString(new TextDecoder().decode(files[modelName]), "application/xml");
-  const vertices = [...xml.querySelectorAll("vertices > vertex")].map((node) => [Number(node.getAttribute("x")), Number(node.getAttribute("y")), Number(node.getAttribute("z"))]);
-  const faces = [...xml.querySelectorAll("triangles > triangle")].map((node) => [Number(node.getAttribute("v1")), Number(node.getAttribute("v2")), Number(node.getAttribute("v3"))]);
+  if (xml.querySelector("parsererror")) throw new Error("3MF model XML is invalid");
+  const unitScale = ({ micron: 0.001, millimeter: 1, centimeter: 10, meter: 1000, inch: 25.4, foot: 304.8 } as Record<string, number>)[xml.documentElement.getAttribute("unit") ?? "millimeter"];
+  if (!unitScale) throw new Error(`Unsupported 3MF unit: ${xml.documentElement.getAttribute("unit")}`);
+  const objects = new Map([...xml.querySelectorAll("resources > object")].map((node) => [node.getAttribute("id") ?? "", node]));
+  const vertices: number[][] = [];
+  const faces: number[][] = [];
+  const appendObject = (id: string, transforms: number[][], resolving = new Set<string>()) => {
+    if (resolving.has(id)) throw new Error(`3MF component graph is cyclic at object ${id}`);
+    const object = objects.get(id);
+    if (!object) throw new Error(`3MF build references missing object ${id}`);
+    const nextResolving = new Set(resolving).add(id);
+    const mesh = object.querySelector(":scope > mesh");
+    if (mesh) {
+      const offset = vertices.length;
+      for (const node of mesh.querySelectorAll("vertices > vertex")) {
+        const raw = [Number(node.getAttribute("x")), Number(node.getAttribute("y")), Number(node.getAttribute("z"))];
+        if (raw.some((item) => !Number.isFinite(item))) throw new Error(`3MF object ${id} contains a non-finite vertex`);
+        vertices.push(transforms.reduce((value, transform) => apply3mfTransform(value, transform), raw).map((value) => value * unitScale));
+      }
+      for (const node of mesh.querySelectorAll("triangles > triangle")) {
+        const face = [Number(node.getAttribute("v1")), Number(node.getAttribute("v2")), Number(node.getAttribute("v3"))];
+        if (face.some((item) => !Number.isInteger(item) || item < 0 || item >= vertices.length - offset)) throw new Error(`3MF object ${id} contains an invalid triangle index`);
+        faces.push(face.map((item) => item + offset));
+      }
+      return;
+    }
+    const components = [...object.querySelectorAll(":scope > components > component")];
+    if (!components.length) throw new Error(`3MF object ${id} contains neither a mesh nor components`);
+    components.forEach((component) => appendObject(component.getAttribute("objectid") ?? "", [parse3mfTransform(component.getAttribute("transform")), ...transforms], nextResolving));
+  };
+  const buildItems = [...xml.querySelectorAll("build > item")];
+  if (buildItems.length) buildItems.forEach((item) => appendObject(item.getAttribute("objectid") ?? "", [parse3mfTransform(item.getAttribute("transform"))]));
+  else objects.forEach((_object, id) => appendObject(id, [identity3mfTransform]));
   if (!vertices.length || !faces.length || vertices.some((vertex) => vertex.some((value) => !Number.isFinite(value)))) throw new Error("3MF model did not contain finite vertices and triangles");
   return { vertices, faces, dimensionsMm: meshDimensions(vertices) };
 }
 
-async function readSolid(path: string, format: "stl" | "3mf"): Promise<SolidMesh> {
+export async function readSolid(path: string, format: "stl" | "3mf"): Promise<SolidMesh> {
   const raw = await invoke<number[] | Uint8Array>("read_authorized_binary_file", { path });
   const bytes = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
   return format === "3mf" ? parse3mf(bytes) : parseStl(bytes);
@@ -67,6 +116,19 @@ export function DesignWorkspace() {
   const [ownershipOpen, setOwnershipOpen] = useState(true);
   const [booleanOpen, setBooleanOpen] = useState(true);
   const selected = useMemo(() => state.scene.find((object) => object.id === state.ui.selectedSceneId) ?? state.scene[0], [state.scene, state.ui.selectedSceneId]);
+  const selectedCalibration = state.calibrations.find((profile) => profile.accepted && profile.tool === selected?.tool);
+  const selectedTargetHu = selected?.targetHu ?? selectedCalibration?.huSamples[Math.floor((selectedCalibration?.huSamples.length ?? 1) / 2)]?.targetHu ?? 0;
+  const hydrationAttempts = useRef(new Set<string>());
+  useEffect(() => {
+    if (!isNativeRuntime()) return;
+    const pending = state.scene.find((object) => object.sourcePath && !object.sourcePath.startsWith("synthetic://") && (!object.vertices?.length || !object.faces?.length) && !hydrationAttempts.current.has(object.id));
+    if (!pending?.sourcePath) return;
+    hydrationAttempts.current.add(pending.id);
+    const format = pending.sourcePath.toLowerCase().endsWith(".3mf") ? "3mf" : "stl";
+    void readSolid(pending.sourcePath, format)
+      .then((mesh) => dispatch({ type: "HYDRATE_IMPORTED_SOLID", id: pending.id, ...mesh }))
+      .catch((error) => dispatch({ type: "SET_TOAST", message: error instanceof Error ? `Mesh preview unavailable: ${error.message}` : "Mesh preview unavailable" }));
+  }, [dispatch, state.scene]);
   const choose = (id: string) => dispatch({ type: "SET_SCENE_SELECTION", id });
   const importSolid = async () => {
     if (!isNativeRuntime()) { dispatch({ type: "SET_TOAST", message: "The browser adapter records import intent only" }); return; }
@@ -81,7 +143,7 @@ export function DesignWorkspace() {
       dispatch({ type: "SET_TOAST", message: validation.valid ? `Validated ${format.toUpperCase()} import` : validation.messages.join(" · ") });
     } catch (error) { dispatch({ type: "SET_TOAST", message: error instanceof Error ? error.message : "Solid import failed" }); }
   };
-  const boolean = (operation: "union" | "subtract" | "intersect") => dispatch({ type: "BOOLEAN_SCENE", operation, operandIds: state.scene.filter((object) => object.visible).map((object) => object.id) });
+  const boolean = (operation: "union" | "subtract" | "intersect") => dispatch({ type: "BOOLEAN_SCENE", operation, operandIds: state.scene.filter((object) => object.visible && object.kind !== "dicom").map((object) => object.id) });
 
   return <div className="workspace-layout design-layout">
     <aside className="left-rail" aria-label="Scene rail">
@@ -108,7 +170,7 @@ export function DesignWorkspace() {
     <aside className="right-inspector" aria-label="Design inspector">
       <div className="inspector-title"><div><span className="workspace-kicker">ACTIVE SELECTION</span><h2>{selected?.name ?? "No selection"}</h2></div><IconButton label="Inspector options" icon="more" size={17} onClick={() => dispatch({ type: "SET_TOAST", message: "Inspector options are local to the active selection" })} /></div>
       <Disclosure title="Transform" open={transformOpen} onToggle={() => setTransformOpen((open) => !open)}><div className="inspector-fields"><TransformRow label="Position" value={selected?.transform.position} onChange={(position) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { position } })} /><TransformRow label="Rotation" value={selected?.transform.rotation} onChange={(rotation) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { rotation } })} /><TransformRow label="Scale" value={selected?.transform.scale} onChange={(scale) => selected && dispatch({ type: "SET_SCENE_TRANSFORM", id: selected.id, transform: { scale } })} /><TransformRow label="Dimensions" value={selected?.dimensionsMm ?? selected?.transform.scale} onChange={(dimensionsMm) => selected && dispatch({ type: "SET_SCENE_DIMENSIONS", id: selected.id, dimensionsMm })} /></div></Disclosure>
-      <Disclosure title="Region and tool" open={ownershipOpen} onToggle={() => setOwnershipOpen((open) => !open)}><SelectField label="Region" value={selected?.region ?? "measurement"} onChange={(event) => selected && dispatch({ type: "SET_SCENE_OWNERSHIP", id: selected.id, region: event.target.value as SceneObject["region"] })}><option value="measurement">Measurement</option><option value="support">Support</option><option value="fixture">Fixture</option></SelectField><SelectField label="Tool" value={selected?.tool ?? "T0"} onChange={(event) => selected && dispatch({ type: "SET_SCENE_OWNERSHIP", id: selected.id, tool: event.target.value as SceneObject["tool"] })}><option value="T0">T0 · Natural PLA</option><option value="T1">T1 · White PLA</option></SelectField></Disclosure>
+      <Disclosure title="Region and tool" open={ownershipOpen} onToggle={() => setOwnershipOpen((open) => !open)}><SelectField label="Region" value={selected?.region ?? "measurement"} onChange={(event) => selected && dispatch({ type: "SET_SCENE_OWNERSHIP", id: selected.id, region: event.target.value as SceneObject["region"] })}><option value="measurement">Measurement</option><option value="support">Support</option><option value="fixture">Fixture</option></SelectField><SelectField label="Tool" value={selected?.tool ?? "T0"} onChange={(event) => selected && dispatch({ type: "SET_SCENE_OWNERSHIP", id: selected.id, tool: event.target.value as SceneObject["tool"] })}><option value="T0">T0 · Natural PLA</option><option value="T1">T1 · White PLA</option></SelectField>{selected && selected.kind !== "dicom" && <NumberField label="Target HU" value={selectedTargetHu} step={1} onChange={(targetHu) => dispatch({ type: "SET_SCENE_TARGET_HU", id: selected.id, targetHu })} />}</Disclosure>
       <Disclosure title="Boolean history" open={booleanOpen} onToggle={() => setBooleanOpen((open) => !open)}><div className="boolean-history">{state.scene.filter((object) => object.boolean).map((object, index) => <div key={object.id}><span className="history-index">{String(index + 1).padStart(2, "0")}</span><span>{object.name}</span><StatusBadge tone="neutral">{object.boolean?.operation}</StatusBadge></div>)}<p>Operands remain inspectable for canonical sidecar validation.</p></div></Disclosure>
       <div className="inspector-actions"><Button variant="primary" icon="check" onClick={async () => { const result = await sidecar.validateScene(state); dispatch({ type: "SET_TOAST", message: result.messages.join(" · ") || (result.valid ? "Scene validated" : "Scene validation failed") }); }}>Validate scene</Button><Button variant="quiet" icon="arrowUpRight" onClick={() => dispatch({ type: "SET_WORKSPACE", workspace: "dicom" })}>Continue to DICOM</Button></div>
     </aside>

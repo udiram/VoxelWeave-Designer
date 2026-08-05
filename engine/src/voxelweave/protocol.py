@@ -57,6 +57,7 @@ class Operation(StrEnum):
     REVERSE_AUDIT_GCODE = "reverse_audit_gcode"
     EXPORT_RUN_PACKAGE = "export_run_package"
     VERIFY_SCAN_BACK = "verify_scan_back"
+    EXPORT_VERIFICATION_REPORT = "export_verification_report"
     CANCEL = "cancel"
 
 

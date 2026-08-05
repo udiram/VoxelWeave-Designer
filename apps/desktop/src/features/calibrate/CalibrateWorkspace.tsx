@@ -39,7 +39,9 @@ export function CalibrateWorkspace() {
   const [evidenceOpen, setEvidenceOpen] = useState(true);
   const profile = useMemo(() => state.calibrations.find((candidate) => candidate.id === selectedProfileId) ?? state.calibrations.find((candidate) => candidate.tool === tool) ?? state.calibrations[0], [selectedProfileId, state.calibrations, tool]);
   const validationErrors = profile ? validateCalibrationProfile(profile) : [];
-  const hasAcceptedProfile = state.calibrations.some((candidate) => candidate.accepted);
+  const hasModeledSolid = state.scene.some((object) => object.visible && object.kind !== "dicom");
+  const requiredTools = useMemo(() => new Set(state.scene.filter((object) => object.visible).map((object) => object.tool)), [state.scene]);
+  const hasRequiredProfiles = requiredTools.size > 0 && [...requiredTools].every((requiredTool) => state.calibrations.some((candidate) => candidate.tool === requiredTool && candidate.accepted));
   const acceptanceNotice = profile ? (validationErrors.length > 0
     ? <Notice tone="warning" title="Profile cannot be accepted"><span>{validationErrors.join(" · ")}</span></Notice>
     : <Notice tone="success" title={profile.accepted ? "Profile accepted" : "Ready for acceptance"}><span>{profile.accepted ? "This binding is eligible for sidecar generation." : "Review the local evidence and accept this binding to enable generation."}</span></Notice>)
@@ -113,8 +115,8 @@ export function CalibrateWorkspace() {
         {acceptanceNotice}
       </> : <Notice tone="info" title="No calibration selected"><span>Create or import a profile to edit identity, acceptance bounds, and HU samples.</span></Notice>}
       <div className="inspector-note"><Icon name="warning" size={15} /><span>Out-of-range commanded widths fail closed. Silent extrapolation is not permitted.</span></div>
-      <div className="inspector-actions"><Button variant="primary" icon="arrowUpRight" onClick={() => dispatch({ type: "SET_WORKSPACE", workspace: "prepare" })} disabled={!hasAcceptedProfile || !state.selection.created}>Continue to Prepare</Button>{profile?.accepted && <span className="gate-note">Calibration explicitly accepted for this project.</span>}</div>
+      <div className="inspector-actions"><Button variant="primary" icon="arrowUpRight" onClick={() => dispatch({ type: "SET_WORKSPACE", workspace: "prepare" })} disabled={!hasRequiredProfiles || (!state.selection.created && !hasModeledSolid)}>Continue to Prepare</Button>{hasRequiredProfiles && <span className="gate-note">Every visible tool assignment has an explicitly accepted calibration.</span>}</div>
     </aside>
-    <AppStatusBar crosshair={profile ? `calibration ${profile.tool} · ${profile.widthRange[0].toFixed(2)}–${profile.widthRange[1].toFixed(2)} mm` : "no calibration profile accepted"} warning={!hasAcceptedProfile} />
+    <AppStatusBar crosshair={profile ? `calibration ${profile.tool} · ${profile.widthRange[0].toFixed(2)}–${profile.widthRange[1].toFixed(2)} mm` : "no calibration profile accepted"} warning={!hasRequiredProfiles} />
   </div>;
 }

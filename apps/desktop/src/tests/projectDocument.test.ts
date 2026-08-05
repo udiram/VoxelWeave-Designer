@@ -22,4 +22,13 @@ describe("versioned project documents", () => {
     clearProjectStorage(storage);
     expect(recoverProject(storage)).toBeNull();
   });
+
+  it("persists imported meshes by scoped source path rather than inline topology", () => {
+    const project = structuredClone(syntheticProjectDocument);
+    project.scene.push({ id: "mesh", name: "mesh", kind: "fixture", region: "fixture", tool: "T1", sourcePath: "/Users/test/model.stl", vertices: Array.from({ length: 5000 }, (_, index) => [index, 0, 0]), faces: [[0, 1, 2]], transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } }, visible: true });
+    const serialized = serializeProject(project);
+    expect(serialized).toContain("/Users/test/model.stl");
+    expect(serialized.length).toBeLessThan(256 * 1024);
+    expect(parseProject(serialized).scene.at(-1)?.vertices).toBeUndefined();
+  });
 });

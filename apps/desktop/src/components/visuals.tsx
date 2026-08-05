@@ -208,12 +208,19 @@ export function VolumePreview({ cropActive = true }: { cropActive?: boolean }) {
   </div>;
 }
 
+let cachedWebgl2Availability: boolean | undefined;
+
 function webgl2Available(): boolean {
   if (typeof document === "undefined" || isDomTestRuntime()) return false;
+  if (cachedWebgl2Availability !== undefined) return cachedWebgl2Availability;
   try {
     const canvas = document.createElement("canvas");
-    return Boolean(canvas.getContext("webgl2"));
+    const context = canvas.getContext("webgl2");
+    cachedWebgl2Availability = Boolean(context);
+    context?.getExtension("WEBGL_lose_context")?.loseContext();
+    return cachedWebgl2Availability;
   } catch {
+    cachedWebgl2Availability = false;
     return false;
   }
 }
@@ -379,7 +386,9 @@ function SceneMesh({ object, selected, onSelect }: { object: SceneObject; select
   const geometry = useMemo(() => meshGeometry(object), [object]);
   useEffect(() => () => geometry.dispose(), [geometry]);
   const dimensions = object.dimensionsMm ?? object.transform.scale;
-  return <mesh geometry={geometry} position={[object.transform.position.x, object.transform.position.z, -object.transform.position.y]} rotation={[object.transform.rotation.x, object.transform.rotation.z, -object.transform.rotation.y]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
+  const sourceDimensions = object.sourceDimensionsMm;
+  const importedScale = sourceDimensions ? [object.transform.scale.x / sourceDimensions.x, object.transform.scale.z / sourceDimensions.z, object.transform.scale.y / sourceDimensions.y] as [number, number, number] : [1, 1, 1] as [number, number, number];
+  return <mesh geometry={geometry} scale={importedScale} position={[object.transform.position.x, object.transform.position.z, -object.transform.position.y]} rotation={[THREE.MathUtils.degToRad(object.transform.rotation.x), THREE.MathUtils.degToRad(object.transform.rotation.z), THREE.MathUtils.degToRad(-object.transform.rotation.y)]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
     <meshStandardMaterial color={object.tool === "T1" ? "#3f8285" : object.kind === "dicom" ? "#28686d" : "#707a7c"} transparent opacity={object.kind === "dicom" ? 0.16 : object.visible ? 0.86 : 0.12} wireframe={object.kind === "dicom"} emissive={selected ? orange : "#000000"} emissiveIntensity={selected ? 0.34 : 0} roughness={0.72} metalness={0.08} />
     {selected && <lineSegments><edgesGeometry args={[geometry]} /><lineBasicMaterial color={orange} /></lineSegments>}
     <Html position={[0, dimensions.z / 2 + 4, 0]} center distanceFactor={120}><span className="scene-object-label">{object.name}</span></Html>
@@ -401,40 +410,47 @@ function DesignScene({ selectedId, onSelect, scene }: { selectedId: string; onSe
 
 export function DesignViewport({ selectedId, onSelect, scene = [] }: { selectedId: string; onSelect: (id: string) => void; scene?: SceneObject[] }) {
   const [workerState, setWorkerState] = useState("validating");
+  const workerRef = useRef<Worker | undefined>(undefined);
   useEffect(() => {
-    let worker: Worker | undefined;
     try {
-      worker = new Worker(new URL("../workers/manifoldWorker.ts", import.meta.url), { type: "module" });
+      const worker = new Worker(new URL("../workers/manifoldWorker.ts", import.meta.url), { type: "module" });
+      workerRef.current = worker;
       worker.onmessage = (event: MessageEvent<{ ok: boolean; message?: string }>) => setWorkerState(event.data.ok ? "validated" : event.data.message ?? "validation unavailable");
       worker.onerror = () => setWorkerState("validation unavailable");
-      worker.postMessage({ operation: "preview", scene: scene.map((object) => ({ id: object.id, kind: object.kind, dimensions: object.dimensionsMm ?? object.transform.scale, vertices: object.vertices, faces: object.faces, boolean: object.boolean })) });
     } catch { setWorkerState("validation unavailable"); }
-    return () => worker?.terminate();
+    return () => { workerRef.current?.terminate(); workerRef.current = undefined; };
+  }, []);
+  useEffect(() => {
+    setWorkerState("validating");
+    const timer = window.setTimeout(() => {
+      workerRef.current?.postMessage({ operation: "preview", scene: scene.map((object) => ({ id: object.id, kind: object.kind, dimensions: object.dimensionsMm ?? object.transform.scale, vertices: object.vertices, faces: object.faces, boolean: object.boolean })) });
+    }, 100);
+    return () => window.clearTimeout(timer);
   }, [scene]);
   return <div className="design-viewport" role="img" aria-label="Interactive parametric design scene preview" data-testid="design-scene-viewport" data-voxelweave-renderer="three-r3f">
     {!webgl2Available() && <WebGL2Unavailable label="The parametric design scene" />}
-    {webgl2Available() && <Canvas gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setWorkerState("WebGL2 unavailable"); }}><DesignScene selectedId={selectedId} onSelect={onSelect} scene={scene} /></Canvas>}
+    {webgl2Available() && <Canvas frameloop="demand" gl={{ antialias: true, powerPreference: "high-performance" }} onCreated={({ gl }) => { if (!gl.capabilities.isWebGL2) setWorkerState("WebGL2 unavailable"); }}><DesignScene selectedId={selectedId} onSelect={onSelect} scene={scene} /></Canvas>}
     <span className="viewport-validation-state" aria-live="polite">{workerState}</span>
   </div>;
 }
 
-type PathInstance = { start: [number, number, number]; end: [number, number, number]; tool: ToolId; selected: boolean };
+type PathInstance = { start: [number, number, number]; end: [number, number, number] };
 
-function ToolpathInstances({ selectedLayer, activeTool, generated }: { selectedLayer: number; activeTool: ToolId; generated: boolean }) {
+function ToolpathToolInstances({ tool, active, generated }: { tool: ToolId; active: boolean; generated: boolean }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   const instances = useMemo<PathInstance[]>(() => Array.from({ length: generated ? 720 : 0 }, (_, index) => {
+    if ((index % 5 === 0 ? "T1" : "T0") !== tool) return undefined;
     const row = Math.floor(index / 24);
     const column = index % 24;
     const x = -80 + column * 6.8;
     const y = -55 + row * 5.8;
     const nextX = x + (row % 2 ? -5.7 : 5.7);
-    return { start: [x, y, (selectedLayer % 20) * 0.2] as [number, number, number], end: [nextX, y + Math.sin(column * 0.8 + row) * 1.2, (selectedLayer % 20) * 0.2] as [number, number, number], tool: index % 5 === 0 ? "T1" : "T0", selected: activeTool === (index % 5 === 0 ? "T1" : "T0") };
-  }), [activeTool, generated, selectedLayer]);
+    return { start: [x, y, 0] as [number, number, number], end: [nextX, y + Math.sin(column * 0.8 + row) * 1.2, 0] as [number, number, number] };
+  }).filter((instance): instance is PathInstance => Boolean(instance)), [generated, tool]);
   useEffect(() => {
     const mesh = ref.current;
     if (!mesh) return;
     const helper = new THREE.Object3D();
-    const color = new THREE.Color();
     instances.forEach((segment, index) => {
       const [sx, sy, sz] = segment.start;
       const [ex, ey, ez] = segment.end;
@@ -447,19 +463,23 @@ function ToolpathInstances({ selectedLayer, activeTool, generated }: { selectedL
       helper.scale.set(length, 0.36, 0.36);
       helper.updateMatrix();
       mesh.setMatrixAt(index, helper.matrix);
-      color.set(segment.selected ? orange : segment.tool === "T1" ? teal : "#aeb6b8");
-      mesh.setColorAt(index, color);
     });
     mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }, [instances]);
-  return <instancedMesh ref={ref} args={[undefined, undefined, Math.max(1, instances.length)]}><boxGeometry args={[1, 1, 1]} /><meshStandardMaterial vertexColors roughness={0.72} metalness={0.05} /></instancedMesh>;
+  return <instancedMesh ref={ref} args={[undefined, undefined, Math.max(1, instances.length)]} visible={instances.length > 0}><boxGeometry args={[1, 1, 1]} /><meshStandardMaterial color={active ? orange : tool === "T1" ? teal : "#aeb6b8"} roughness={0.72} metalness={0.05} /></instancedMesh>;
+}
+
+function ToolpathInstances({ selectedLayer, activeTool, generated }: { selectedLayer: number; activeTool: ToolId; generated: boolean }) {
+  return <group position={[0, (selectedLayer % 20) * 0.2, 0]}>
+    <ToolpathToolInstances tool="T0" active={activeTool === "T0"} generated={generated} />
+    <ToolpathToolInstances tool="T1" active={activeTool === "T1"} generated={generated} />
+  </group>;
 }
 
 export function ToolpathCanvas({ selectedLayer, activeTool = "T0", generated = true, totalLayers }: { selectedLayer: number; activeTool?: ToolId; generated?: boolean; totalLayers?: number }) {
   return <div className="toolpath-canvas" role="img" aria-label={`Generated segment preview for layer ${selectedLayer}`} data-voxelweave-renderer="three-r3f">
     {!webgl2Available() && <WebGL2Unavailable label="The toolpath renderer" />}
-    {webgl2Available() && <Canvas gl={{ antialias: true, powerPreference: "high-performance" }}><PerspectiveCamera makeDefault position={[0, 150, 210]} fov={46} near={0.1} far={1000} /><ambientLight intensity={0.45} /><directionalLight position={[100, 120, 180]} intensity={1.1} /><gridHelper args={[220, 22, "#697477", "#293033"]} /><mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.2, 0]}><planeGeometry args={[190, 150]} /><meshStandardMaterial color="#15191a" /></mesh><ToolpathInstances selectedLayer={selectedLayer} activeTool={activeTool} generated={generated} /><OrbitControls makeDefault enablePan enableZoom enableRotate /><Html position={[-100, 76, 0]}><span className="viewport-badge">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected · instanced paths</span></Html></Canvas>}
+    {webgl2Available() && <Canvas frameloop="demand" gl={{ antialias: true, powerPreference: "high-performance" }}><PerspectiveCamera makeDefault position={[0, 150, 210]} fov={46} near={0.1} far={1000} /><ambientLight intensity={0.45} /><directionalLight position={[100, 120, 180]} intensity={1.1} /><gridHelper args={[220, 22, "#697477", "#293033"]} /><mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.2, 0]}><planeGeometry args={[190, 150]} /><meshStandardMaterial color="#15191a" /></mesh><ToolpathInstances selectedLayer={selectedLayer} activeTool={activeTool} generated={generated} /><OrbitControls makeDefault enablePan enableZoom enableRotate /><Html position={[-100, 76, 0]}><span className="viewport-badge">Layer {selectedLayer}{totalLayers ? ` / ${totalLayers}` : ""} · {activeTool} selected · instanced paths</span></Html></Canvas>}
   </div>;
 }
 
