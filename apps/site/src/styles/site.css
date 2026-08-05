@@ -961,6 +961,62 @@ h3 { font-size: 1.45rem; line-height: 1.1; }
   .workspace-rail__item:nth-child(6) { border-bottom: 0; }
   .window-body { padding-inline: 14px; gap: 6px; }
   .app-cube { width: 48px; height: 48px; font-size: 1.2rem; line-height: 48px; }
+  .release-table-wrap {
+    overflow: visible;
+    border: 0;
+  }
+  .release-table {
+    display: block;
+    min-width: 0;
+  }
+  .release-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .release-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+  .release-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px 18px;
+    padding: 18px;
+    border: 1px solid var(--color-divider);
+    background: var(--color-panel);
+  }
+  .release-table td {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+  .release-table td::before {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--color-muted);
+    content: attr(data-label);
+    font-size: 0.68rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .release-artifact-name,
+  .checksum-cell {
+    grid-column: 1 / -1;
+  }
+  .release-artifact-name { overflow-wrap: anywhere; }
+  .checksum-cell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    max-width: none;
+  }
+  .checksum-cell::before { grid-column: 1 / -1; }
+  .release-table td:last-child { align-self: end; }
   .evidence-band { grid-template-columns: 1fr 1fr; }
   .evidence-check,
   .evidence-check:nth-child(4) { border-right: 1px solid var(--color-divider); }

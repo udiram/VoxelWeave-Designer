@@ -88,9 +88,10 @@ const formatDate = (value: string | null | undefined): string => {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(date);
 };
 
-const createCell = (text: string, className?: string): HTMLTableCellElement => {
+const createCell = (text: string, label: string, className?: string): HTMLTableCellElement => {
   const cell = document.createElement('td');
   if (className) cell.className = className;
+  cell.dataset.label = label;
   cell.textContent = text;
   return cell;
 };
@@ -101,11 +102,12 @@ const renderArtifactRows = (artifacts: ReleaseArtifact[]) => {
   for (const artifact of artifacts) {
     const row = document.createElement('tr');
     const name = artifact.name ?? artifact.artifact ?? 'Unnamed artifact';
-    const artifactCell = createCell(name, 'release-artifact-name');
-    const architectureCell = createCell(artifact.architecture ?? 'Unspecified');
-    const sizeCell = createCell(formatSize(artifact));
+    const artifactCell = createCell(name, 'Artifact', 'release-artifact-name');
+    const architectureCell = createCell(artifact.architecture ?? 'Unspecified', 'Architecture');
+    const sizeCell = createCell(formatSize(artifact), 'Size');
     const checksumCell = document.createElement('td');
     checksumCell.className = 'checksum-cell';
+    checksumCell.dataset.label = 'SHA-256';
     const checksum = artifact.sha256?.replace(/^sha256:/i, '') ?? '';
     const checksumText = document.createElement('code');
     checksumText.textContent = checksum || 'Not reported';
@@ -122,6 +124,7 @@ const renderArtifactRows = (artifacts: ReleaseArtifact[]) => {
       checksumCell.append(copyButton);
     }
     const downloadCell = document.createElement('td');
+    downloadCell.dataset.label = 'Download';
     const href = verifiedHref(artifact.downloadPath) ?? verifiedHref(artifact.url);
     if (href) {
       const link = document.createElement('a');
