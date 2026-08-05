@@ -82,13 +82,15 @@ const githubUrl = import.meta.env.PUBLIC_GITHUB_URL ?? 'https://github.com/udbha
       </div>
 
       <div class="bench-scroll" tabindex="0" aria-label="Scroll the fabrication bench horizontally on narrow screens">
-        <img
-          src="/assets/fabrication-bench.png"
-          width="1536"
-          height="1024"
-          alt="Fabrication bench showing VoxelWeave Designer screens for geometry, DICOM, calibration, toolpaths, export, and registered scan-back"
-          loading="lazy"
-        />
+        <div class="bench-crop">
+          <img
+            src="/assets/fabrication-bench.png"
+            width="1536"
+            height="1024"
+            alt="Fabrication bench showing VoxelWeave Designer screens for geometry, DICOM, calibration, toolpaths, export, and registered scan-back"
+            loading="lazy"
+          />
+        </div>
       </div>
       <p class="bench-caption">Accepted fabrication-bench concept treatment, paired with the code-native workspace contract below.</p>
 
