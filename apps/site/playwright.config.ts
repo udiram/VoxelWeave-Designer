@@ -17,7 +17,7 @@ export default defineConfig({
     { name: 'chromium-mobile', use: { ...devices['iPhone 13'], viewport: { width: 390, height: 844 } } }
   ],
   webServer: {
-    command: 'pnpm dev --host 0.0.0.0',
+    command: 'pnpm build && pnpm exec astro preview --host 0.0.0.0',
     url: 'http://127.0.0.1:4321',
     reuseExistingServer: true,
     timeout: 120_000
