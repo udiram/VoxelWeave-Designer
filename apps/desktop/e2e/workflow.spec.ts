@@ -230,4 +230,164 @@ test.describe("VoxelWeave Designer synthetic desktop workflow", () => {
     await page.screenshot({ path: join(evidenceDir, "desktop-design-manipulation-1536x1024.png"), fullPage: false, scale: "css" });
     expect(runtimeErrors).toEqual([]);
   });
+
+  test("edits structures with multi-select, grouping, locking, deletion, clipboard, and history", async ({ page }) => {
+    test.skip(page.viewportSize()?.width === 390, "the complete editor contract is covered at the full workspace viewport");
+    const runtimeErrors: string[] = [];
+    page.on("pageerror", (error) => runtimeErrors.push(error.message));
+    page.on("console", (message) => { if (message.type() === "error") runtimeErrors.push(message.text()); });
+    await resetProject(page);
+
+    const actions = page.getByTestId("selection-action-bar");
+    const reference = page.getByTestId("scene-row-scene-reference-box");
+    const airway = page.getByTestId("scene-row-scene-airway-support");
+    await reference.click();
+    await airway.click({ modifiers: ["Shift"] });
+    await expect(actions.getByText("2 selected", { exact: true })).toBeVisible();
+    await expect(reference).toHaveAttribute("aria-selected", "true");
+    await expect(airway).toHaveAttribute("aria-selected", "true");
+
+    await actions.getByRole("button", { name: "Duplicate" }).click();
+    const referenceCopy = page.getByTestId("scene-row-scene-reference-box-copy");
+    const airwayCopy = page.getByTestId("scene-row-scene-airway-support-copy");
+    await expect(referenceCopy).toBeVisible();
+    await expect(airwayCopy).toBeVisible();
+    await expect(actions.getByText("2 selected", { exact: true })).toBeVisible();
+
+    await actions.getByRole("button", { name: "Group" }).click();
+    await expect(actions.getByRole("button", { name: "Ungroup" })).toBeVisible();
+    await page.screenshot({ path: join(evidenceDir, "desktop-design-multiselect-1536x1024.png"), fullPage: false, scale: "css" });
+    await actions.getByRole("button", { name: "Lock" }).click();
+    await expect(actions.getByRole("button", { name: "Unlock" })).toBeVisible();
+    await actions.getByRole("button", { name: "Delete" }).click();
+    await expect(referenceCopy).toBeVisible();
+    await expect(airwayCopy).toBeVisible();
+    await expect(page.getByText(/Nothing deleted|Locked 2 objects/)).toBeVisible();
+
+    await actions.getByRole("button", { name: "Unlock" }).click();
+    await actions.getByRole("button", { name: "Ungroup" }).click();
+    await page.keyboard.press("Backspace");
+    await expect(referenceCopy).toHaveCount(0);
+    await expect(airwayCopy).toHaveCount(0);
+    await page.getByRole("button", { name: "Undo scene edit" }).click();
+    await expect(referenceCopy).toBeVisible();
+    await expect(airwayCopy).toBeVisible();
+    await page.getByRole("button", { name: "Redo scene edit" }).click();
+    await expect(referenceCopy).toHaveCount(0);
+    await expect(airwayCopy).toHaveCount(0);
+
+    await reference.click();
+    const nameField = page.getByRole("textbox", { name: "Structure name" });
+    await nameField.fill("Alignment frame");
+    await nameField.press("Enter");
+    await expect(reference).toContainText("Alignment frame");
+    await page.keyboard.press("Meta+c");
+    await page.keyboard.press("Meta+v");
+    await expect(page.getByTestId("scene-row-scene-reference-box-copy")).toContainText("Alignment frame copy");
+
+    await page.getByTestId("scene-row-scene-lung-volume").click();
+    await actions.getByRole("button", { name: "Delete" }).click();
+    await expect(page.getByTestId("scene-row-scene-lung-volume")).toBeVisible();
+    await expect(page.getByText(/Nothing deleted/)).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(actions.getByText("No selection", { exact: true })).toBeVisible();
+    await expect(page.getByText("Select a structure", { exact: true })).toBeVisible();
+    await page.screenshot({ path: join(evidenceDir, "desktop-design-complete-editor-1536x1024.png"), fullPage: false, scale: "css" });
+    expect(runtimeErrors).toEqual([]);
+  });
+
+  test("keeps grouped transforms rigid and protects group selection through range and keyboard visibility", async ({ page }) => {
+    test.skip(page.viewportSize()?.width === 390, "group transform coverage is desktop-only");
+    const runtimeErrors: string[] = [];
+    page.on("pageerror", (error) => runtimeErrors.push(error.message));
+    page.on("console", (message) => { if (message.type() === "error") runtimeErrors.push(message.text()); });
+    await resetProject(page);
+
+    const actions = page.getByTestId("selection-action-bar");
+    const lung = page.getByTestId("scene-row-scene-lung-volume");
+    const reference = page.getByTestId("scene-row-scene-reference-box");
+    const airway = page.getByTestId("scene-row-scene-airway-support");
+    const positionX = page.getByRole("textbox", { name: "Position x" });
+    const positionY = page.getByRole("textbox", { name: "Position y" });
+    const rotationZ = page.getByRole("textbox", { name: "Rotation z" });
+    const sizeY = page.getByRole("textbox", { name: "Size y" });
+    const readPosition = async (row: ReturnType<Page["getByTestId"]>) => {
+      await row.click();
+      return { x: Number(await positionX.inputValue()), y: Number(await positionY.inputValue()) };
+    };
+
+    await reference.click();
+    await positionX.fill("40");
+    await positionX.blur();
+    await airway.click();
+    await positionX.fill("-40");
+    await positionX.blur();
+    const beforeReference = await readPosition(reference);
+    const beforeAirway = await readPosition(airway);
+
+    await reference.click();
+    await airway.click({ modifiers: ["Shift"] });
+    await actions.getByRole("button", { name: "Group" }).click();
+    await expect(actions.getByRole("button", { name: "Ungroup" })).toBeVisible();
+
+    const beforeDeltaX = beforeAirway.x - beforeReference.x;
+    await rotationZ.fill("90");
+    await rotationZ.blur();
+    await expect.poll(async () => {
+      const currentReference = await readPosition(reference);
+      const currentAirway = await readPosition(airway);
+      return Math.abs(currentAirway.y - currentReference.y);
+    }).toBeGreaterThan(Math.abs(beforeDeltaX) * 0.7);
+    const rotatedReference = await readPosition(reference);
+    const rotatedAirway = await readPosition(airway);
+    const rotatedDeltaX = rotatedAirway.x - rotatedReference.x;
+    const rotatedDeltaY = rotatedAirway.y - rotatedReference.y;
+    expect(Math.abs(rotatedDeltaX)).toBeLessThan(Math.max(1, Math.abs(beforeDeltaX) * 0.15));
+    expect(Math.abs(rotatedDeltaY)).toBeGreaterThan(Math.abs(beforeDeltaX) * 0.7);
+
+    await reference.click();
+    const scaleBefore = Number(await sizeY.inputValue());
+    await sizeY.fill(String(scaleBefore * 1.5));
+    await sizeY.blur();
+    await expect.poll(async () => {
+      const currentReference = await readPosition(reference);
+      const currentAirway = await readPosition(airway);
+      return Math.abs(currentAirway.y - currentReference.y);
+    }).toBeGreaterThan(Math.abs(rotatedDeltaY) * 1.35);
+    const scaledReference = await readPosition(reference);
+    const scaledAirway = await readPosition(airway);
+    const scaledDeltaY = scaledAirway.y - scaledReference.y;
+    expect(Math.abs(scaledDeltaY)).toBeGreaterThan(Math.abs(rotatedDeltaY) * 1.35);
+
+    const centerBeforeReference = scaledReference;
+    const centerBeforeAirway = scaledAirway;
+    await reference.click();
+    await page.getByRole("button", { name: "Center selection on XY origin" }).click();
+    const centeredReference = await readPosition(reference);
+    const centeredAirway = await readPosition(airway);
+    expect(centeredReference.x - centerBeforeReference.x).toBeCloseTo(centeredAirway.x - centerBeforeAirway.x, 3);
+    expect(centeredReference.y - centerBeforeReference.y).toBeCloseTo(centeredAirway.y - centerBeforeAirway.y, 3);
+
+    await lung.click();
+    await reference.click({ modifiers: ["Shift"] });
+    await expect(actions.getByText("3 selected", { exact: true })).toBeVisible();
+    await expect(airway).toHaveAttribute("aria-selected", "true");
+
+    await reference.click();
+    const hideReference = reference.getByRole("button", { name: "Hide Reference frame" });
+    await hideReference.focus();
+    await hideReference.press("Enter");
+    await expect(reference.getByRole("button", { name: "Show Reference frame" })).toHaveAttribute("aria-pressed", "true");
+    await expect(reference).toHaveAttribute("aria-selected", "false");
+    await expect(airway).toHaveAttribute("aria-selected", "false");
+
+    const showReference = reference.getByRole("button", { name: "Show Reference frame" });
+    await showReference.focus();
+    await showReference.press(" ");
+    await expect(reference.getByRole("button", { name: "Hide Reference frame" })).toHaveAttribute("aria-pressed", "false");
+    await expect(reference).toHaveAttribute("aria-selected", "false");
+    await expect(airway).toHaveAttribute("aria-selected", "false");
+    expect(runtimeErrors).toEqual([]);
+  });
 });

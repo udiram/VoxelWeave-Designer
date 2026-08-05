@@ -21,16 +21,25 @@ interface ProjectContextValue {
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
 
-type SceneSnapshot = Pick<ProjectState, "scene"> & { selectedSceneId: string };
+type SceneSnapshot = Pick<ProjectState, "scene"> & { selectedSceneId: string; selectedSceneIds: string[] };
 type ProjectHistory = { present: ProjectState; past: SceneSnapshot[]; future: SceneSnapshot[] };
 type ProjectHistoryAction = { type: "project"; action: ProjectAction } | { type: "undo" } | { type: "redo" };
 
 const sceneHistoryActions = new Set<ProjectAction["type"]>([
   "SET_SCENE_TRANSFORM",
+  "SET_SCENE_TRANSFORMS",
   "SET_SCENE_DIMENSIONS",
   "SET_SCENE_OWNERSHIP",
   "SET_SCENE_TARGET_HU",
   "TOGGLE_SCENE_VISIBILITY",
+  "DELETE_SCENE_OBJECTS",
+  "DUPLICATE_SCENE_OBJECTS",
+  "INSERT_SCENE_OBJECTS",
+  "GROUP_SCENE_OBJECTS",
+  "UNGROUP_SCENE_OBJECTS",
+  "SET_SCENE_LOCKED",
+  "RENAME_SCENE_OBJECT",
+  "ALIGN_SCENE_OBJECTS",
   "ADD_PRIMITIVE",
   "BOOLEAN_SCENE",
   "IMPORT_SOLID",
@@ -38,7 +47,7 @@ const sceneHistoryActions = new Set<ProjectAction["type"]>([
 ]);
 
 function sceneSnapshot(state: ProjectState): SceneSnapshot {
-  return { scene: state.scene, selectedSceneId: state.ui.selectedSceneId };
+  return { scene: state.scene, selectedSceneId: state.ui.selectedSceneId, selectedSceneIds: state.ui.selectedSceneIds ?? [state.ui.selectedSceneId].filter(Boolean) };
 }
 
 function projectHistoryReducer(history: ProjectHistory, action: ProjectHistoryAction): ProjectHistory {

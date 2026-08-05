@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { directGestureTransform, scenePositionToThree, sceneRotationToThree, sceneScaleToThree, threePositionToScene, threeRotationToScene, threeScaleToScene } from "../components/visuals";
+import { rotateSceneVector } from "../features/design/DesignWorkspace";
 import type { SceneObject } from "../types";
 
 const object: SceneObject = {
@@ -33,6 +34,19 @@ describe("scene and Three transform mapping", () => {
     const expectedThree = new THREE.Vector3(...scenePositionToThree(expectedScene));
     const actualThree = new THREE.Vector3(...scenePositionToThree(sceneVector)).applyEuler(new THREE.Euler(...sceneRotationToThree(degrees), "XYZ"));
     expect(actualThree.distanceTo(expectedThree)).toBeLessThan(1e-6);
+  });
+
+  it("uses Three XYZ Euler order for combined-axis grouped rotation", () => {
+    const vector = { x: 17.25, y: -8.5, z: 4.75 };
+    const rotation = { x: 31, y: -47, z: 63 };
+    const expected = new THREE.Vector3(vector.x, vector.y, vector.z).applyEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(rotation.x),
+      THREE.MathUtils.degToRad(rotation.y),
+      THREE.MathUtils.degToRad(rotation.z),
+      "XYZ",
+    ));
+    const actual = rotateSceneVector(vector, rotation);
+    expect(new THREE.Vector3(actual.x, actual.y, actual.z).distanceTo(expected)).toBeLessThan(1e-9);
   });
 
   it("maps target dimensions to relative mesh scale and back", () => {

@@ -1,8 +1,8 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from "react";
 import { Icon, type IconName } from "./icons";
 
-export function IconButton({ label, icon, size = 18, className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: IconName; size?: number }) {
-  return <button {...props} type={props.type ?? "button"} className={`icon-button ${className}`} aria-label={label} title={label}><Icon name={icon} size={size} /></button>;
+export function IconButton({ label, icon, size = 18, className = "", title, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: IconName; size?: number }) {
+  return <button {...props} type={props.type ?? "button"} className={`icon-button ${className}`} aria-label={label} title={title ?? label}><Icon name={icon} size={size} /></button>;
 }
 
 export function Button({ children, variant = "secondary", icon, className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "quiet" | "danger"; icon?: IconName }) {
