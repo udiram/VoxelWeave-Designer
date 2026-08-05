@@ -296,7 +296,7 @@ def validate_scene(scene: Mapping[str, Any]) -> dict[str, Any]:
     manifold_available = False
     manifold_error: str | None = None
     try:
-        from manifold3d import Manifold, Mesh  # type: ignore[import-not-found]
+        from manifold3d import Manifold, Mesh
 
         manifold_available = True
     except Exception as exc:  # pragma: no cover - exercised on native package builds

@@ -92,7 +92,7 @@ def _sample_voxel_array(volume: Volume, voxel_xyz: np.ndarray, *, method: str) -
     if method != "linear":
         raise ValueError("MPR sampling method must be nearest or linear.")
     try:
-        from scipy.ndimage import map_coordinates  # type: ignore[import-untyped]
+        from scipy.ndimage import map_coordinates
 
         coords = np.stack((z.ravel(), y.ravel(), x.ravel()), axis=0)
         return np.asarray(map_coordinates(volume.hu, coords, order=1, mode="nearest").reshape(x.shape), dtype=np.float32)
