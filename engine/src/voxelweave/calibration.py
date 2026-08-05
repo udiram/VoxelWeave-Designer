@@ -95,6 +95,10 @@ class Calibration:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Calibration:
         binding_data = dict(value.get("binding", {}))
+        density_value = binding_data.get(
+            "material_density_g_cm3",
+            binding_data.get("material_density_g_per_cm3", binding_data.get("density_g_cm3")),
+        )
         binding = CalibrationBinding(
             pitch_mm=float(binding_data["pitch_mm"]),
             layer_height_mm=float(binding_data["layer_height_mm"]),
@@ -107,7 +111,7 @@ class Calibration:
             reconstruction=str(binding_data["reconstruction"]),
             flow_mm3_s=float(binding_data.get("flow_mm3_s", 1.0)),
             flow_mm3_per_min=(float(binding_data["flow_mm3_per_min"]) if "flow_mm3_per_min" in binding_data and "flow_mm3_s" not in binding_data else None),
-            material_density_g_cm3=(float(binding_data["material_density_g_cm3"]) if binding_data.get("material_density_g_cm3") is not None else None),
+            material_density_g_cm3=(float(density_value) if density_value is not None else None),
         )
         return cls(
             calibration_id=str(value["calibration_id"]),
