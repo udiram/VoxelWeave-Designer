@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voxelweave.local/contracts/binary-artifact.v1.schema.json",
+  "title": "VoxelWeave typed binary artifact header",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["format", "artifact_type", "dtype", "shape", "payload_bytes", "payload_sha256"],
+  "properties": {
+    "format": { "const": "voxelweave.binary.v1" },
+    "artifact_type": { "type": "string", "minLength": 1 },
+    "dtype": { "type": "string", "minLength": 1 },
+    "shape": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+    "payload_bytes": { "type": "integer", "minimum": 0 },
+    "payload_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "spacing_mm_dyx": { "type": "array", "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }], "minItems": 3, "maxItems": 3 },
+    "origin_lps": { "type": "array", "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }], "minItems": 3, "maxItems": 3 },
+    "direction_lps": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } } },
+    "source_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

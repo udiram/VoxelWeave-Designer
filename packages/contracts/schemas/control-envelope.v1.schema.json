@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voxelweave.local/contracts/control-envelope.v1.schema.json",
+  "title": "VoxelWeave bounded control envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "request_id", "operation", "payload"],
+  "properties": {
+    "protocol": { "const": "voxelweave.control.v1" },
+    "request_id": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$" },
+    "operation": {
+      "enum": [
+        "inspect_dicom_source",
+        "select_dicom_series",
+        "build_volume_cache",
+        "request_mpr_plane",
+        "request_volume_preview",
+        "sample_voxel",
+        "calculate_histogram",
+        "create_print_selection",
+        "validate_scene",
+        "generate_toolpath",
+        "reverse_audit_gcode",
+        "export_run_package",
+        "verify_scan_back",
+        "cancel"
+      ]
+    },
+    "payload": { "type": "object", "additionalProperties": true }
+  }
+}
