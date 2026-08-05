@@ -113,7 +113,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: desktop-native-bundle
-          path: "$RUNNER_TEMP/desktop-native-bundle"
+          path: ${{ runner.temp }}/desktop-native-bundle
       - name: Inspect every Mach-O architecture
         env:
           DESKTOP_RESULT: ${{ needs.desktop.result }}
