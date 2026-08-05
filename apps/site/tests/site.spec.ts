@@ -26,6 +26,12 @@ const mockedRelease = async (page: import('@playwright/test').Page) => {
         sourceRevision: 'abc1234',
         publishedAt: '2026-08-04T12:00:00Z',
         artifacts: [{
+          name: 'VoxelWeave-Designer-arm64.app.zip',
+          architecture: 'Apple Silicon',
+          size: '281.4 MB',
+          sha256: 'b'.repeat(64),
+          downloadPath: '/download/development-12/VoxelWeave-Designer-arm64.app.zip'
+        }, {
           name: 'VoxelWeave-Designer-arm64.dmg',
           architecture: 'Apple Silicon',
           size: '284.6 MB',
@@ -81,7 +87,7 @@ test('mocked release renders artifact receipt, checks, checksum, and verified do
   await page.goto('/');
 
   await expect(page.locator('[data-release-table]')).toBeVisible();
-  const row = page.locator('[data-release-rows] tr').first();
+  const row = page.locator('[data-release-rows] tr').filter({ hasText: 'VoxelWeave-Designer-arm64.dmg' });
   await expect(row).toContainText('VoxelWeave-Designer-arm64.dmg');
   await expect(row).toContainText('Apple Silicon');
   await expect(row).toContainText('284.6 MB');
