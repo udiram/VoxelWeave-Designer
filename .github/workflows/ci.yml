@@ -54,6 +54,18 @@ jobs:
         run: pnpm --dir apps/desktop exec playwright install chromium
       - name: Run desktop gates (Chromium/test-adapter coverage)
         run: pnpm run check:desktop
+      - name: Qualify production Chromium UI performance (browser adapter and WebGL2 probe)
+        run: |
+          set -euo pipefail
+          pnpm --dir apps/desktop exec node ../../scripts/benchmark-desktop-ui.mjs \
+            --output-dir "$RUNNER_TEMP/voxelweave-desktop-ui-performance"
+      - name: Upload browser UI performance evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-browser-ui-performance
+          path: ${{ runner.temp }}/voxelweave-desktop-ui-performance
+          if-no-files-found: warn
       - name: Build the arm64 sidecar and run JSONL cross-runtime smoke
         run: |
           set -euo pipefail
@@ -204,9 +216,21 @@ jobs:
         run: python -m pip install --disable-pip-version-check pyyaml
       - name: Validate release evidence verifier
         run: pnpm run test:release-evidence
+      - name: Validate exact native adapter payload contract
+        run: |
+          set -euo pipefail
+          python3 scripts/check-native-adapter-contract.py \
+            --report "$RUNNER_TEMP/voxelweave-native-adapter-contract.json"
       - name: Check local documentation links
         run: pnpm run check:links
       - name: Parse workflow YAML and platform boundary
         run: pnpm run check:workflows
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml
+      - name: Upload native adapter contract evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-native-adapter-contract
+          path: ${{ runner.temp }}/voxelweave-native-adapter-contract.json
+          if-no-files-found: warn

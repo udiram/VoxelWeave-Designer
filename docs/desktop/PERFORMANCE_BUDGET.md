@@ -50,6 +50,49 @@ orbit FPS, geometry interaction FPS, and main-thread task duration are not
 measured by this sidecar harness and still require built-app profiling or
 Instruments evidence.
 
+## Production browser UI gate
+
+The desktop job also builds the production web bundle and runs
+`scripts/benchmark-desktop-ui.mjs` in headless Chromium with WebGL2 enabled
+through SwiftShader. The run uses one warmup and three measured iterations of
+the deterministic browser adapter. It records:
+
+- first meaningful Design workspace render;
+- DICOM MPR and volume-pointer interaction frame intervals;
+- Design geometry/transform interaction frame intervals (with the required R3F/WebGL2 marker);
+- generated toolpath layer interaction frame intervals;
+- Long Task API durations during those interactions; and
+- Chromium WebGL2 capability and renderer information.
+
+The gate budget is in `scripts/desktop-ui-performance-budget.json`. Targets
+remain the product intent; only the deliberately generous `gate_ms` severe-
+regression limits block CI. JSON evidence is written to
+`ui-performance.json` and uploaded separately from native app evidence.
+
+This is browser-adapter evidence, not native qualification. The gate requires
+the Design and Toolpath roots to expose
+`data-voxelweave-renderer="three-r3f"` and a child canvas that can create a
+WebGL2 context. If either marker is absent, the run fails rather than
+pretending that SVG/2D-canvas interaction is R3F orbit evidence. It does not
+measure WKWebView frame pacing, native GPU memory, or Instruments traces.
+Those remain a required follow-up for a packaged-app profiling pass before
+making native WebKit or Three.js claims.
+
+Run the browser UI gate locally after building the desktop bundle and
+installing the desktop workspace dependencies:
+
+```sh
+pnpm --dir apps/desktop run build
+pnpm --dir apps/desktop exec playwright install chromium
+pnpm --dir apps/desktop exec node ../../scripts/benchmark-desktop-ui.mjs \
+  --output-dir /tmp/voxelweave-desktop-ui-performance
+```
+
+The native adapter's exact TypeScript/Rust operation and envelope lists are
+checked independently by `scripts/check-native-adapter-contract.py` and the
+release-evidence unit tests. Cross-runtime and native-app smoke remain the
+behavioral payload checks.
+
 Run a local native qualification on an Apple Silicon macOS host with:
 
 ```sh

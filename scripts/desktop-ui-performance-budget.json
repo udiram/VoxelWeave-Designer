@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "voxelweave.desktop-ui-performance-budget.v1",
+  "measurement": "production desktop web bundle in Chromium with the synthetic browser adapter",
+  "metrics": {
+    "first_workspace_render_ms": {
+      "target_ms": 2000,
+      "gate_ms": 10000,
+      "description": "First meaningful Design workspace render after navigation"
+    },
+    "dicom_mpr_interaction_p95_frame_ms": {
+      "target_ms": 16.7,
+      "gate_ms": 120,
+      "description": "95th-percentile requestAnimationFrame interval during DICOM MPR and volume interactions"
+    },
+    "design_geometry_interaction_p95_frame_ms": {
+      "target_ms": 16.7,
+      "gate_ms": 120,
+      "description": "95th-percentile requestAnimationFrame interval during SVG geometry and transform interactions"
+    },
+    "toolpath_interaction_p95_frame_ms": {
+      "target_ms": 16.7,
+      "gate_ms": 120,
+      "description": "95th-percentile requestAnimationFrame interval during generated toolpath layer interactions"
+    },
+    "main_thread_long_task_max_ms": {
+      "target_ms": 100,
+      "gate_ms": 1000,
+      "description": "Maximum Long Task API duration observed during measured interactions"
+    },
+    "webgl2_probe_ms": {
+      "target_ms": 50,
+      "gate_ms": 5000,
+      "description": "Temporary Chromium WebGL2 capability probe duration"
+    }
+  },
+  "unmeasured": [
+    "native WebKit or WKWebView frame pacing",
+    "Instruments native main-thread and GPU traces",
+    "native WebKit Three.js or React Three Fiber frame pacing and GPU memory",
+    "clinical DICOM or physical print/scan-back performance"
+  ]
+}
