@@ -382,7 +382,7 @@ class EngineSession:
                     self._workspace_path(payload.get("directory"), "verification-report"),
                     run_id=(str(payload["run_id"]) if payload.get("run_id") is not None else None),
                     gcode_sha256=self.generated.gcode_sha256,
-                    source_to_print_transform=transform,
+                    coordinate_transforms=transform,
                 )
             raise ProtocolError(f"Unsupported operation: {op.value}")
         finally:

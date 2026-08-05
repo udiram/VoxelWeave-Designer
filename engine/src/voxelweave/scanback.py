@@ -59,7 +59,7 @@ def export_verification_package(
     *,
     run_id: str | None = None,
     gcode_sha256: str | None = None,
-    source_to_print_transform: object | None = None,
+    coordinate_transforms: object | None = None,
 ) -> dict[str, Any]:
     """Write a deterministic, hash-indexed verification evidence package."""
 
@@ -68,11 +68,11 @@ def export_verification_package(
     report_path = target / "verification-report.json"
     provenance_path = target / "provenance.json"
     report = {
-        "schema": "voxelweave.verification-report.v1",
+        "schema": "voxelweave.verification-report.v2",
         "verification": verification.to_dict(),
         "run_id": run_id,
         "gcode_sha256": gcode_sha256,
-        "source_to_print_transform": source_to_print_transform,
+        "coordinate_transforms": coordinate_transforms,
         "evidence_boundary": {
             "comparison_type": "registered_signed_hu_scan_back",
             "dose_gamma": "not_used_hu_gamma_is_not_dose_gamma",

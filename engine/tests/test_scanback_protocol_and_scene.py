@@ -6,11 +6,16 @@ import zipfile
 from pathlib import Path
 
 from voxelweave import (
+    Calibration,
+    CalibrationBinding,
     ControlEnvelope,
     EngineSession,
     Operation,
+    PrinterProfile,
+    create_print_selection,
     create_synthetic_volume,
     encode_jsonl,
+    generate_toolpath,
     parse_jsonl,
     synthetic_scan_back,
     verify_scan_back,
@@ -41,6 +46,57 @@ def test_verification_package_preserves_hashed_provenance(tmp_path: Path) -> Non
     assert exported["hashes"][report_path.name] == hashlib.sha256(report_path.read_bytes()).hexdigest()
     with zipfile.ZipFile(exported["package_path"]) as archive:
         assert set(archive.namelist()) == {"verification-report.json", "provenance.json", "hashes.json"}
+
+
+def test_engine_session_verification_export_carries_versioned_bidirectional_transforms(tmp_path: Path) -> None:
+    source = create_synthetic_volume(pattern="ramp", shape_zyx=(5, 6, 7), hu_min=-800, hu_max=800)
+    selection = create_print_selection(
+        source,
+        plane="axial",
+        mode="continuous",
+        start_index=1,
+        end_index=3,
+        layer_height_mm=0.5,
+        print_size_mm=(6.0, 5.0, 1.5),
+    )
+    calibration = Calibration(
+        calibration_id="verification-export-fixture",
+        binding=CalibrationBinding(
+            pitch_mm=1.0,
+            layer_height_mm=0.5,
+            nozzle_mm=0.4,
+            tool="T0",
+            material="synthetic PLA",
+            lot="test-only",
+            printer="Prusa XL",
+            scanner="synthetic CT",
+            reconstruction="STANDARD",
+        ),
+        commanded_width_mm=(0.2, 0.5, 0.8),
+        measured_hu_mean=(-800.0, 0.0, 800.0),
+        evidence_reference="synthetic fixture only",
+    )
+    generated = generate_toolpath(selection, calibration, profile=PrinterProfile(sample_step_mm=3.0))
+    verification = verify_scan_back(source, synthetic_scan_back(source, noise_hu=1.0))
+    with EngineSession(workspace=tmp_path) as session:
+        session.volume = source
+        session.selection = selection
+        session.generated = generated
+        session.verification = verification
+        exported = session.handle(
+            ControlEnvelope(
+                "export-verification",
+                Operation.EXPORT_VERIFICATION_REPORT,
+                {"directory": "verification", "run_id": "run-1"},
+            )
+        )
+        report = json.loads(Path(exported["report_path"]).read_text(encoding="utf-8"))
+    assert report["schema"] == "voxelweave.verification-report.v2"
+    transforms = report["coordinate_transforms"]
+    assert transforms["schema"] == "voxelweave.coordinate-transforms.v3"
+    assert len(transforms["source_to_print_matrix"]) == 4
+    assert len(transforms["print_to_source_matrix"]) == 4
+    assert transforms["single_and_tile_normal_policy"] == "selected_source_plane_repeated_through_print_thickness"
 
 
 def test_protocol_operations_are_versioned_and_scene_is_fail_closed() -> None:
