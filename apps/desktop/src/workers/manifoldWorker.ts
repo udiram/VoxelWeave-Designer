@@ -22,6 +22,7 @@ async function runtime() {
 async function validateScene(scene: WorkerObject[]) {
   const module = await runtime();
   const operands = new Map<string, InstanceType<typeof module.Manifold>>();
+  const consumed = new Set<string>();
   const preservedOperands = scene.map((object) => object.id);
   for (const object of scene) {
     const dimensions = object.dimensions ?? { x: 1, y: 1, z: 1 };
@@ -47,11 +48,11 @@ async function validateScene(scene: WorkerObject[]) {
     if (solids.length !== graph.operands.length) throw new Error(`Boolean ${object.id} references an unknown operand`);
     const combined = graph.operation === "union" ? module.Manifold.union(solids) : graph.operation === "subtract" ? module.Manifold.difference(solids) : module.Manifold.intersection(solids);
     operands.set(object.id, combined);
-    for (const operand of solids) operand.delete();
+    graph.operands.forEach((id) => consumed.add(id));
   }
-  const solids = [...operands.values()];
-  const volume = solids.reduce((sum, solid) => sum + solid.volume(), 0);
-  solids.forEach((solid) => solid.delete());
+  const rootSolids = [...operands.entries()].filter(([id]) => !consumed.has(id)).map(([, solid]) => solid);
+  const volume = rootSolids.reduce((sum, solid) => sum + solid.volume(), 0);
+  [...new Set(operands.values())].forEach((solid) => solid.delete());
   return { operandIds: preservedOperands, volumeMm3: volume, booleanCount: scene.filter((object) => Boolean(object.boolean)).length };
 }
 
