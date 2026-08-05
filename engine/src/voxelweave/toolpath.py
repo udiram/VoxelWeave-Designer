@@ -1078,15 +1078,17 @@ def export_run_package(generated: GeneratedToolpath, directory: str | Path) -> d
         metadata={"segment_count": len(trace), "tool_id_encoding": "sorted_tool_names_zero_based", "tool_ids": tool_names},
     )
     selection_path = target / "selection_manifest.json"
-    transform_path = target / "source_to_print_transform.json"
+    transform_path = target / "coordinate_transforms.json"
     report_path = target / "run_report.json"
     scene_path = target / "scene_manifest.json"
     audit = generated.audit()
     _write_json(selection_path, generated.selection.manifest.to_dict())
     _write_json(transform_path, {
-        "schema": "voxelweave.source-to-print-transform.v2",
-        "matrix": generated.selection.manifest.source_to_print_transform,
-        "tile_matrices": getattr(generated.selection.manifest, "tile_source_to_print_transforms", ()),
+        "schema": "voxelweave.coordinate-transforms.v3",
+        "source_to_print_matrix": generated.selection.manifest.source_to_print_transform,
+        "print_to_source_matrix": generated.selection.manifest.print_to_source_transform,
+        "tile_transforms": getattr(generated.selection.manifest, "tile_transforms", ()),
+        "single_and_tile_normal_policy": "selected_source_plane_repeated_through_print_thickness",
     })
     report = {**generated.report, "gcode_sha256": generated.gcode_sha256, "preview_sha256": generated.preview_sha256, "audit": audit.to_dict()}
     _write_json(report_path, report)

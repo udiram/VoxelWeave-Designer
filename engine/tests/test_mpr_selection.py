@@ -59,6 +59,12 @@ def test_continuous_tile_and_single_selection_contracts() -> None:
     )
     assert continuous.selected_source_indices == (1, 2, 3, 4)
     assert continuous.manifest.resampling == "full_resolution_signed_hu_at_printer_layer_centers"
+    np.testing.assert_allclose(
+        np.asarray(continuous.manifest.source_to_print_transform)
+        @ np.asarray(continuous.manifest.print_to_source_transform),
+        np.eye(4),
+        atol=1e-9,
+    )
     first_layer = continuous.sample_hu(4.0, 4.0, 0.5)
     last_layer = continuous.sample_hu(4.0, 4.0, 3.5)
     assert first_layer != last_layer
@@ -78,10 +84,11 @@ def test_continuous_tile_and_single_selection_contracts() -> None:
     assert tile.manifest.plate_layout["rows"] == 2
     assert [item["label"] for item in tile.manifest.structural_regions] == ["A", "B", "C"]
     assert tile.manifest.structural_regions[0]["region"] == "structural_outside_measurement_roi"
-    assert len(tile.manifest.tile_source_to_print_transforms) == 3
-    assert [item["source_index"] for item in tile.manifest.tile_source_to_print_transforms] == [1, 3, 5]
-    assert [item["matrix"][0][3] for item in tile.manifest.tile_source_to_print_transforms] == [1.0, 3.0, 5.0]
-    assert all(item["matrix"][0][2] == 0.0 for item in tile.manifest.tile_source_to_print_transforms)
+    assert len(tile.manifest.tile_transforms) == 3
+    assert [item["source_index"] for item in tile.manifest.tile_transforms] == [1, 3, 5]
+    assert [item["print_to_source_matrix"][0][3] for item in tile.manifest.tile_transforms] == [1.0, 3.0, 5.0]
+    assert all(item["print_to_source_matrix"][0][2] == 0.0 for item in tile.manifest.tile_transforms)
+    assert all(item["source_to_print_matrix"][2] == (0.0, 0.0, 0.0, 0.0) for item in tile.manifest.tile_transforms)
     with pytest.raises(GeometryValidationError, match="Tile thickness must agree"):
         create_print_selection(
             volume,
@@ -99,8 +106,9 @@ def test_continuous_tile_and_single_selection_contracts() -> None:
     assert single.print_size_mm[2] == 2.0
     assert single.manifest.source_bounds_voxel_xyz[0][1] == 3.0
     assert single.manifest.source_bounds_voxel_xyz[1][1] == 3.0
-    assert single.manifest.source_to_print_transform[1][2] == 0.0
-    assert single.manifest.source_to_print_transform[1][3] == 3.0
+    assert single.manifest.print_to_source_transform[1][2] == 0.0
+    assert single.manifest.print_to_source_transform[1][3] == 3.0
+    assert single.manifest.source_to_print_transform[2] == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_continuous_range_samples_only_selected_slab_endpoints() -> None:

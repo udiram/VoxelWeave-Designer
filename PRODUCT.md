@@ -32,7 +32,7 @@ These users are technically fluent but often operate under time pressure around 
 
 ## Core Promise
 
-Move from a complete DICOM series or modeled solid to a deterministic, inspectable print package while preserving physical coordinates, calibration provenance, tool/material ownership, source-to-print transforms, and the distinction between software evidence and physical validation.
+Move from a complete DICOM series or modeled solid to a deterministic, inspectable print package while preserving physical coordinates, calibration provenance, tool/material ownership, bidirectional source/print transforms, and the distinction between software evidence and physical validation.
 
 ## Scientific Contract
 

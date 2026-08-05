@@ -8,7 +8,7 @@ export function SendWorkspace() {
   const { state, dispatch, sidecar } = useProject();
   const [manifestOpen, setManifestOpen] = useState(true);
   const [exporting, setExporting] = useState(false);
-  const files = state.send.files ?? ["toolpath.gcode", "toolpath_preview.bin", "toolpath_trace.bin", "selection_manifest.json", "source_to_print_transform.json", "run_report.json", "hashes.json"];
+  const files = state.send.files ?? ["toolpath.gcode", "toolpath_preview.bin", "toolpath_trace.bin", "selection_manifest.json", "coordinate_transforms.json", "run_report.json", "hashes.json"];
 
   const exportPackage = async () => {
     setExporting(true);
@@ -50,7 +50,7 @@ function artifactPurpose(file: string): string {
   if (file === "toolpath_preview.bin") return "Exact generated segment preview";
   if (file === "toolpath_trace.bin") return "Audited multi-tool trace";
   if (file === "selection_manifest.json") return "Physical source selection";
-  if (file === "source_to_print_transform.json") return "Source-to-print transform";
+  if (file === "coordinate_transforms.json") return "Bidirectional coordinate transforms";
   if (file === "run_report.json") return "Run report and reverse audit";
   if (file === "hashes.json") return "SHA-256 artifact index";
   return "Sidecar-returned run artifact";

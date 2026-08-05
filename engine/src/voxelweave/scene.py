@@ -397,6 +397,7 @@ class ModeledSelectionManifest:
     print_size_mm: Vec3
     source_bounds_mm: tuple[Vec3, Vec3]
     source_to_print_transform: tuple[tuple[float, ...], ...]
+    print_to_source_transform: tuple[tuple[float, ...], ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -406,6 +407,7 @@ class ModeledSelectionManifest:
             "print_size_mm": list(self.print_size_mm),
             "source_bounds_mm": [list(self.source_bounds_mm[0]), list(self.source_bounds_mm[1])],
             "source_to_print_transform": [list(row) for row in self.source_to_print_transform],
+            "print_to_source_transform": [list(row) for row in self.print_to_source_transform],
             "physical_geometry_claim": "canonical_geometry_only_deposition_requires_validation",
             "physical_fidelity_claim": "not_established_by_software",
         }
@@ -438,7 +440,13 @@ class ModeledPrintSelection:
             (0.0, 0.0, 1.0, -low_z),
             (0.0, 0.0, 0.0, 1.0),
         )
-        self.manifest = ModeledSelectionManifest(self.canonical_scene.source_hash, size, ((low_x, low_y, low_z), (high_x, high_y, high_z)), matrix)
+        inverse = (
+            (1.0, 0.0, 0.0, low_x),
+            (0.0, 1.0, 0.0, low_y),
+            (0.0, 0.0, 1.0, low_z),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        self.manifest = ModeledSelectionManifest(self.canonical_scene.source_hash, size, ((low_x, low_y, low_z), (high_x, high_y, high_z)), matrix, inverse)
 
     @property
     def layer_count(self) -> int:

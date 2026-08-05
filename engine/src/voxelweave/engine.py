@@ -371,9 +371,11 @@ class EngineSession:
                     raise EngineError("Generate and reverse-audit the run before exporting its verification report.")
                 selection = self.generated.selection
                 transform = {
-                    "schema": "voxelweave.source-to-print-transform.v2",
-                    "matrix": selection.manifest.source_to_print_transform,
-                    "tile_matrices": getattr(selection.manifest, "tile_source_to_print_transforms", ()),
+                    "schema": "voxelweave.coordinate-transforms.v3",
+                    "source_to_print_matrix": selection.manifest.source_to_print_transform,
+                    "print_to_source_matrix": selection.manifest.print_to_source_transform,
+                    "tile_transforms": getattr(selection.manifest, "tile_transforms", ()),
+                    "single_and_tile_normal_policy": "selected_source_plane_repeated_through_print_thickness",
                 }
                 return export_verification_package(
                     self.verification,

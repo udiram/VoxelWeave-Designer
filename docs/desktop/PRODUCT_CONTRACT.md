@@ -33,7 +33,7 @@ Selection types:
 
 Continuous output never inserts artificial solid faces at source-slice boundaries and never treats one DICOM slice as one printer layer. Tile labels, notches, tabs, anchors, and spacing are structural regions outside the calibrated measurement region.
 
-Crop bounds are stored in physical patient coordinates and synchronized across all MPR panes and the 3D crop box. Physical aspect ratio is locked by default. The run report records the complete source-to-print transform and resampling method. A single-plane transform has a zero normal-axis column and translates to the selected source plane. Tile output records one such matrix per tile/source index because a set of independently placed planes cannot be represented by one affine matrix.
+Crop bounds are stored in physical patient coordinates and synchronized across all MPR panes and the 3D crop box. Physical aspect ratio is locked by default. Artifacts explicitly record both patient-LPS/scene-mm-to-print-mm and print-mm-to-source coordinate maps plus the resampling method. Continuous maps are inverses. For single and tile selections, source-to-print is an in-plane projection with a zero print-normal row; print-to-source fixes the normal coordinate to the selected source plane because that plane is repeated through the requested print thickness. Tile output records one transform pair per tile/source index because independently placed planes cannot be represented by one affine matrix.
 
 ## Geometry and Regions
 
@@ -53,7 +53,7 @@ The canonical rail-field query returns occupied state, DICOM source coordinate, 
 
 VoxelWeave emits alternating X/Y variable-width roads at a global layer height, obeying tool/material flow caps, speed and acceleration limits, minimum segment length, width-transition constraints, bed bounds, first-layer protection, and explicit multi-tool interface policy.
 
-The run package contains plaintext G-code, run report, toolpath trace, DICOM selection manifest, source-to-print transform, exact generated-segment preview stream, and SHA-256 hashes. Final G-code is reverse-parsed and compared with the preview stream for coordinates, widths, tools, feedrates, extrusion, bounds, and wrapper identity.
+The run package contains plaintext G-code, run report, toolpath trace, DICOM selection manifest, bidirectional coordinate transforms, exact generated-segment preview stream, and SHA-256 hashes. Final G-code is reverse-parsed and compared with the preview stream for coordinates, widths, tools, feedrates, extrusion, bounds, and wrapper identity.
 
 Opening a saved project clears process-local generated/audited/exported/verification flags. If the document references local DICOM or mesh sources, the desktop app lists their count and requires an explicit reauthorization confirmation for the new session before those paths are made available to the sidecar. Generation then reconstructs the persisted DICOM selection from its normalized fields, preventing stale cross-project engine state.
 

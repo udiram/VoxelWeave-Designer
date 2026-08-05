@@ -63,7 +63,8 @@ class SelectionManifest:
     print_size_mm: Vec3
     layer_height_mm: float
     source_to_print_transform: tuple[tuple[float, ...], ...]
-    tile_source_to_print_transforms: tuple[dict[str, Any], ...]
+    print_to_source_transform: tuple[tuple[float, ...], ...]
+    tile_transforms: tuple[dict[str, Any], ...]
     resampling: str
     plate_layout: dict[str, Any]
     structural_regions: tuple[dict[str, Any], ...]
@@ -72,7 +73,7 @@ class SelectionManifest:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema": "voxelweave.selection-manifest.v1",
+            "schema": "voxelweave.selection-manifest.v2",
             "plane": self.plane,
             "mode": self.mode,
             "crop_min_lps": list(self.crop_min_lps),
@@ -83,7 +84,8 @@ class SelectionManifest:
             "print_size_mm": list(self.print_size_mm),
             "layer_height_mm": self.layer_height_mm,
             "source_to_print_transform": [list(row) for row in self.source_to_print_transform],
-            "tile_source_to_print_transforms": [canonicalize(item) for item in self.tile_source_to_print_transforms],
+            "print_to_source_transform": [list(row) for row in self.print_to_source_transform],
+            "tile_transforms": [canonicalize(item) for item in self.tile_transforms],
             "resampling": self.resampling,
             "plate_layout": canonicalize(self.plate_layout),
             "structural_regions": [canonicalize(item) for item in self.structural_regions],
@@ -187,7 +189,7 @@ class PrintSelection:
         return self.manifest.to_dict()
 
 
-def _transform_for_selection(
+def _print_to_source_transform(
     volume: Volume,
     plane: PlaneName,
     low: np.ndarray,
@@ -201,6 +203,15 @@ def _transform_for_selection(
     for print_axis, source_axis in enumerate(axes):
         source_extent_mm = (high[source_axis] - low[source_axis]) * volume.spacing_mm[2 - source_axis] if source_axis < 2 else (high[source_axis] - low[source_axis]) * volume.spacing_mm[0]
         matrix[:3, print_axis] = volume.direction_lps[:, source_axis] * (source_extent_mm / print_size[print_axis])
+    return tuple(tuple(float(f"{item:.12g}") for item in row) for row in matrix)
+
+
+def _source_to_print_transform(print_to_source: tuple[tuple[float, ...], ...]) -> tuple[tuple[float, ...], ...]:
+    sampling = np.asarray(print_to_source, dtype=np.float64)
+    linear_inverse = np.linalg.pinv(sampling[:3, :3], rcond=1e-12)
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = linear_inverse
+    matrix[:3, 3] = -linear_inverse @ sampling[:3, 3]
     return tuple(tuple(float(f"{item:.12g}") for item in row) for row in matrix)
 
 
@@ -351,20 +362,25 @@ def create_print_selection(
     transform_high = sample_high.copy()
     if mode == "tile":
         transform_high[normal_axis] = transform_low[normal_axis]
-    transform = _transform_for_selection(volume, plane, transform_low, transform_high, requested_size)
+    print_to_source = _print_to_source_transform(volume, plane, transform_low, transform_high, requested_size)
+    transform = _source_to_print_transform(print_to_source)
     tile_transforms = tuple(
         {
             "tile_index": tile_index,
             "source_index": source_index,
-            "matrix": _transform_for_selection(
+            "source_to_print_matrix": _source_to_print_transform(tile_print_to_source),
+            "print_to_source_matrix": tile_print_to_source,
+        }
+        for tile_index, source_index in enumerate(selected_indices)
+        for tile_print_to_source in (
+            _print_to_source_transform(
                 volume,
                 plane,
                 np.where(np.arange(3) == normal_axis, float(source_index), low),
                 np.where(np.arange(3) == normal_axis, float(source_index), high),
                 requested_size,
             ),
-        }
-        for tile_index, source_index in enumerate(selected_indices)
+        )
     ) if mode == "tile" else ()
     crop_min = cast(Vec3, tuple(float(item) for item in volume.voxel_to_lps(tuple(float(value) for value in low))))
     crop_max = cast(Vec3, tuple(float(item) for item in volume.voxel_to_lps(tuple(float(value) for value in high))))
@@ -381,7 +397,8 @@ def create_print_selection(
         print_size_mm=requested_size,
         layer_height_mm=float(layer_height_mm),
         source_to_print_transform=transform,
-        tile_source_to_print_transforms=tile_transforms,
+        print_to_source_transform=print_to_source,
+        tile_transforms=tile_transforms,
         resampling=resampling or ("full_resolution_signed_hu_at_printer_layer_centers" if mode == "continuous" else "full_resolution_signed_hu_plane_sampling"),
         plate_layout=plate,
         structural_regions=structural,

@@ -106,6 +106,11 @@ def test_preview_resolution_does_not_change_gcode_and_package_is_deterministic(t
     assert first["audit"]["passed"]
     assert first["package_name"] == "run-package.zip"
     assert (tmp_path / "one" / "run-package.zip").is_file()
+    transforms = json.loads((tmp_path / "one" / "coordinate_transforms.json").read_text(encoding="utf-8"))
+    assert transforms["schema"] == "voxelweave.coordinate-transforms.v3"
+    assert len(transforms["source_to_print_matrix"]) == 4
+    assert len(transforms["print_to_source_matrix"]) == 4
+    assert "source_to_print_transform.json" not in first["files"]
 
 
 def test_volumetric_flow_cap_wins_over_minimum_speed_preference() -> None:
