@@ -1,5 +1,33 @@
 import { syntheticProjectDocument } from "../data/fixtures";
-import type { CropBounds, DicomSource, ProjectAction, ProjectState, ProjectUiState } from "../types";
+import type { CalibrationProfile, CropBounds, DicomSource, ProjectAction, ProjectState, ProjectUiState } from "../types";
+
+const requiredCalibrationFields: Array<keyof Pick<CalibrationProfile, "name" | "material" | "lot" | "printer" | "scanner" | "reconstruction">> = ["name", "material", "lot", "printer", "scanner", "reconstruction"];
+
+export function validateCalibrationProfile(profile: CalibrationProfile): string[] {
+  const errors: string[] = [];
+  requiredCalibrationFields.forEach((field) => {
+    if (!profile[field].trim()) errors.push(`${field} is required`);
+  });
+  if (profile.tool !== "T0" && profile.tool !== "T1") errors.push("tool binding is invalid");
+  if (!Number.isFinite(profile.nozzleMm) || profile.nozzleMm <= 0) errors.push("nozzle must be greater than 0 mm");
+  if (!Number.isFinite(profile.layerHeightMm) || profile.layerHeightMm <= 0) errors.push("layer height must be greater than 0 mm");
+  const [minimum, maximum] = profile.widthRange;
+  if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum < 0 || maximum <= minimum) errors.push("width range must be finite and increasing");
+  if (profile.huSamples.length < 2) errors.push("at least two HU samples are required");
+  let previousWidth = Number.NEGATIVE_INFINITY;
+  profile.huSamples.forEach((sample, index) => {
+    if (!Number.isFinite(sample.widthMm) || sample.widthMm <= previousWidth) errors.push(`HU sample ${index + 1} widths must be strictly increasing`);
+    if (sample.widthMm < minimum || sample.widthMm > maximum) errors.push(`HU sample ${index + 1} is outside the accepted width range`);
+    if (!Number.isFinite(sample.measuredHu) || !Number.isFinite(sample.targetHu)) errors.push(`HU sample ${index + 1} must contain finite values`);
+    previousWidth = sample.widthMm;
+  });
+  return [...new Set(errors)];
+}
+
+function profileWithValidation(profile: CalibrationProfile, accepted: boolean): CalibrationProfile {
+  const errors = validateCalibrationProfile(profile);
+  return { ...profile, accepted, mismatch: errors.length ? errors.join("; ") : undefined };
+}
 
 export function sourcePhysicalBounds(source: DicomSource): CropBounds {
   const extent = {
@@ -111,9 +139,38 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         selection: { ...state.selection, created: true },
         ui: { ...state.ui, toast: "Print selection created from physical coordinates" },
       };
+    case "UPSERT_CALIBRATION_PROFILE": {
+      const profile = profileWithValidation(action.profile, false);
+      const existing = state.calibrations.some((candidate) => candidate.id === profile.id);
+      return {
+        ...state,
+        calibrations: existing ? state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate) : [...state.calibrations, profile],
+        selection: state.selection.calibrationId === profile.id ? { ...state.selection, calibrationId: profile.id } : state.selection,
+        ui: { ...state.ui, toast: profile.mismatch ? `Calibration imported; edit required: ${profile.mismatch}` : `Calibration profile ${profile.name || profile.id} is ready for review` },
+      };
+    }
+    case "UPDATE_CALIBRATION_PROFILE": {
+      const current = state.calibrations.find((candidate) => candidate.id === action.id);
+      if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
+      const profile = profileWithValidation({ ...current, ...action.patch, accepted: false }, false);
+      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === profile.id ? profile : candidate), ui: { ...state.ui, toast: profile.mismatch ? `Calibration needs review: ${profile.mismatch}` : "Calibration edits saved; accept the profile to bind it to generation" } };
+    }
+    case "ACCEPT_CALIBRATION_PROFILE": {
+      const current = state.calibrations.find((candidate) => candidate.id === action.id);
+      if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
+      const errors = validateCalibrationProfile(current);
+      if (errors.length) return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: false, mismatch: errors.join("; ") } : candidate), ui: { ...state.ui, toast: `Cannot accept calibration: ${errors.join(" · ")}` } };
+      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: true, mismatch: undefined } : candidate), selection: { ...state.selection, calibrationId: action.id }, ui: { ...state.ui, toast: `Accepted calibration ${current.name}` } };
+    }
+    case "REVOKE_CALIBRATION_PROFILE": {
+      const current = state.calibrations.find((candidate) => candidate.id === action.id);
+      if (!current) return { ...state, ui: { ...state.ui, toast: "Calibration profile not found" } };
+      return { ...state, calibrations: state.calibrations.map((candidate) => candidate.id === action.id ? { ...candidate, accepted: false, mismatch: "Acceptance revoked; review before generation" } : candidate), selection: state.selection.calibrationId === action.id ? { ...state.selection, calibrationId: undefined } : state.selection, toolpath: { ...state.toolpath, generated: false, audited: false, runId: undefined }, ui: { ...state.ui, toast: `Revoked calibration ${current.name}; generation is blocked until re-accepted` } };
+    }
     case "REVIEW_CALIBRATION":
       return {
         ...state,
+        selection: { ...state.selection, calibrationId: action.profileId },
         ui: { ...state.ui, toast: `Reviewed ${state.calibrations.find((profile) => profile.id === action.profileId)?.name ?? "calibration profile"}` },
       };
     case "ACKNOWLEDGE_CLIPPING":
@@ -123,6 +180,9 @@ export function projectReducer(state: ProjectState, action: ProjectAction): Proj
         ui: { ...state.ui, toast: "Width clipping acknowledged for this run" },
       };
     case "SET_TOOLPATH_GENERATED":
+      if (!state.calibrations.some((profile) => profile.accepted)) {
+        return { ...state, ui: { ...state.ui, toast: "Generation blocked: explicitly accept a calibration profile first" } };
+      }
       return {
         ...state,
         toolpath: { ...state.toolpath, generated: true, runId: action.runId, estimated: action.estimate, clippingPercent: action.clippingPercent ?? state.toolpath.clippingPercent },

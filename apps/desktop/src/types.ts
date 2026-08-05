@@ -195,6 +195,10 @@ export type ProjectAction =
   | { type: "SET_SELECTION"; patch: Partial<PrintSelection> }
   | { type: "SET_DICOM_SOURCE"; source: DicomSource }
   | { type: "CREATE_PRINT_SELECTION" }
+  | { type: "UPSERT_CALIBRATION_PROFILE"; profile: CalibrationProfile }
+  | { type: "UPDATE_CALIBRATION_PROFILE"; id: string; patch: Partial<CalibrationProfile> }
+  | { type: "ACCEPT_CALIBRATION_PROFILE"; id: string }
+  | { type: "REVOKE_CALIBRATION_PROFILE"; id: string }
   | { type: "REVIEW_CALIBRATION"; profileId: string }
   | { type: "ACKNOWLEDGE_CLIPPING" }
   | { type: "SET_TOOLPATH_GENERATED"; runId: string; estimate: ToolpathState["estimated"]; clippingPercent?: number }

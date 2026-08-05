@@ -100,6 +100,29 @@ test.describe("VoxelWeave Designer synthetic desktop workflow", () => {
     await writeAccessibilityEvidence(page, `${prefix}-accessibility.json`);
   });
 
+  test("blocks a native empty project without calibration and requires explicit acceptance", async ({ page }) => {
+    test.skip(page.viewportSize()?.width === 390, "native empty-project gate is covered at the desktop viewport");
+    await page.addInitScript(() => {
+      window.localStorage.clear();
+      Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    });
+    await page.goto("/");
+    await workspaceButton(page, "Calibrate").click();
+    await expect(page.getByText("No calibration profiles")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue to Prepare" })).toBeDisabled();
+  });
+
+  test("requires explicit acceptance before a fixture calibration can be used", async ({ page }) => {
+    await resetProject(page);
+    await workspaceButton(page, "Calibrate").click();
+    await expect(page.getByRole("button", { name: "Revoke acceptance" })).toBeVisible();
+    await page.getByRole("button", { name: "Revoke acceptance" }).click();
+    await expect(page.getByRole("button", { name: "Accept calibration" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue to Prepare" })).toBeDisabled();
+    await page.getByRole("button", { name: "Accept calibration" }).click();
+    await expect(page.getByRole("button", { name: "Revoke acceptance" })).toBeVisible();
+  });
+
   test("keeps workspace navigation and evidence controls usable at 390px", async ({ page }) => {
     await resetProject(page);
     const prefix = evidencePrefix(page);

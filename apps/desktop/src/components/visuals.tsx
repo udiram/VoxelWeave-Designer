@@ -217,8 +217,8 @@ export function ToolpathCanvas({ selectedLayer, activeTool = "T0", generated = t
   </div>;
 }
 
-export function CalibrationPlot({ tool = "T0" }: { tool?: ToolId }) {
-  const points = tool === "T0" ? [[64, 178], [142, 158], [223, 128], [298, 101]] : [[64, 191], [142, 163], [223, 131], [298, 104]];
+export function CalibrationPlot({ tool = "T0", samples }: { tool?: ToolId; samples?: Array<{ widthMm: number; measuredHu: number }> }) {
+  const points = samples?.length ? samples.map((sample) => [64 + Math.max(0, Math.min(1, (sample.widthMm - 0.4) / 0.8)) * 234, 186 - Math.max(0, Math.min(1, (sample.measuredHu + 900) / 900)) * 168] as [number, number]) : tool === "T0" ? [[64, 178], [142, 158], [223, 128], [298, 101]] : [[64, 191], [142, 163], [223, 131], [298, 104]];
   return <div className="calibration-plot" role="img" aria-label={`${tool} calibration width to HU plot`}>
     <svg viewBox="0 0 350 220" preserveAspectRatio="none"><path d="M44 18v168h280M44 55h280M44 97h280M44 139h280" fill="none" stroke="#dce0e0" strokeWidth="1"/><path d="M44 18v168h280" fill="none" stroke="#9ba2a4" strokeWidth="1.2"/><polyline points={points.map(([x, y]) => `${x},${y}`).join(" ")} fill="none" stroke={teal} strokeWidth="2.5" />{points.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="5" fill="#fff" stroke={teal} strokeWidth="2" />)}<text x="48" y="16" fill="#596266" fontSize="11">HU</text><text x="278" y="207" fill="#596266" fontSize="11">commanded width · mm</text><text x="12" y="190" fill="#596266" fontSize="10">−900</text><text x="16" y="99" fill="#596266" fontSize="10">−450</text><text x="23" y="22" fill="#596266" fontSize="10">0</text><text x="49" y="206" fill="#596266" fontSize="10">0.4</text><text x="153" y="206" fill="#596266" fontSize="10">0.7</text><text x="258" y="206" fill="#596266" fontSize="10">1.0</text></svg>
   </div>;

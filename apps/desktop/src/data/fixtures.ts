@@ -198,6 +198,7 @@ export const emptyProjectDocument: ProjectDocument = {
     outputDimensionsMm: { x: 0, y: 0, z: 0 },
     created: false,
   },
+  calibrations: [],
   toolpath: { ...structuredClone(syntheticProjectDocument.toolpath), totalLayers: 0, selectedLayer: 0 },
 };
 
