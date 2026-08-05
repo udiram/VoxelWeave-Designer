@@ -146,29 +146,42 @@ jobs:
           name: voxelweave-${{ env.RELEASE_VERSION }}-evidence
           path: ${{ env.RELEASE_OUTPUT }}
       - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          target_commitish: ${{ github.sha }}
-          name: VoxelWeave Designer ${{ env.RELEASE_VERSION }}
-          prerelease: ${{ env.RELEASE_CHANNEL == 'development-prerelease' }}
-          draft: false
-          body: |
-            ${{ env.RELEASE_CHANNEL == 'development-prerelease' && 'Development prerelease for controlled testing. This build has a verified ad-hoc integrity seal, but is not Developer ID-signed or notarized; do not use it for clinical decisions or patient care.' || 'Stable Apple Silicon release, Developer ID-signed and notarized through the fail-closed production lane.' }}
+        run: |
+          set -euo pipefail
+          notes_file="$RELEASE_OUTPUT/release-notes.md"
+          if [[ "$RELEASE_CHANNEL" == "development-prerelease" ]]; then
+            summary="Development prerelease for controlled testing. This build has a verified ad-hoc integrity seal, but is not Developer ID-signed or notarized; do not use it for clinical decisions or patient care."
+          else
+            summary="Stable Apple Silicon release, Developer ID-signed and notarized through the fail-closed production lane."
+          fi
+          {
+            printf '%s\n\n' "$summary"
+            printf 'Source revision: `%s`\n\n' "$GITHUB_SHA"
+            printf '%s\n' \
+              'Validation evidence:' \
+              '- [x] Unit + integration — passed for this exact source revision in GitHub CI' \
+              '- [x] Desktop browser-adapter E2E — responsive workspace and accessibility checks passed' \
+              '- [x] Native package smoke — packaged app process and bundled sidecar protocol handshake passed' \
+              '- [x] Performance — real-sidecar benchmark remained inside documented Apple Silicon budgets' \
+              '- [x] Architecture — outer binaries and extracted PyInstaller Mach-O payloads are arm64' \
+              '- [x] Release checksum — SHA-256 manifest generated and verified before publication' \
+              '' \
+              'Real DICOM remains local. Physical HU and deposited-width claims still require scan-back verification.'
+          } > "$notes_file"
 
-            Source revision: `${{ github.sha }}`
-
-            Validation evidence:
-            - [x] Unit + integration — passed for this source revision in GitHub CI
-            - [x] Desktop E2E — passed for desktop and 390 px responsive workspace flows
-            - [x] Accessibility — automated keyboard, landmark, label, and contrast checks passed
-            - [x] Architecture — every shipped Mach-O component inspected as Apple Silicon arm64
-            - [x] Release checksum — SHA-256 manifest generated and verified before publication
-
-            Real DICOM remains local. Physical HU and deposited-width claims still require scan-back verification.
-          files: |
-            ${{ env.RELEASE_OUTPUT }}/assets/*.zip
-            ${{ env.RELEASE_OUTPUT }}/assets/*.dmg
-            ${{ env.RELEASE_OUTPUT }}/SHA256SUMS
-            ${{ env.RELEASE_OUTPUT }}/architecture-report.txt
-            ${{ env.RELEASE_OUTPUT }}/release-evidence.json
+          release_args=(
+            release create "$RELEASE_TAG"
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "VoxelWeave Designer $RELEASE_VERSION"
+            --notes-file "$notes_file"
+          )
+          if [[ "$RELEASE_CHANNEL" == "development-prerelease" ]]; then
+            release_args+=(--prerelease --latest=false)
+          fi
+          gh "${release_args[@]}" \
+            "$RELEASE_OUTPUT"/assets/*.zip \
+            "$RELEASE_OUTPUT"/assets/*.dmg \
+            "$RELEASE_OUTPUT/SHA256SUMS" \
+            "$RELEASE_OUTPUT/architecture-report.txt" \
+            "$RELEASE_OUTPUT/release-evidence.json"
