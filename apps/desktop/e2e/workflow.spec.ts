@@ -23,12 +23,9 @@ async function resetProject(page: Page) {
   await page.addInitScript(() => window.localStorage.clear());
   await page.goto("/");
   await expect(page).toHaveTitle("VoxelWeave Designer");
-  const desktopProjectButton = page.getByTestId("open-synthetic-project");
-  if (await desktopProjectButton.isVisible()) {
-    await desktopProjectButton.click();
-  } else {
-    await page.getByTestId("open-synthetic-project-mobile").click();
-  }
+  const projectButton = page.locator('[data-testid="open-synthetic-project"]:visible, [data-testid="open-synthetic-project-mobile"]:visible').first();
+  await expect(projectButton).toBeVisible();
+  await projectButton.click();
   await expect(page.getByRole("heading", { name: "Design" })).toBeVisible();
   const renderer = page.locator('[data-testid="design-scene-viewport"][data-voxelweave-renderer="three-r3f"] canvas');
   await expect(renderer).toBeVisible();
