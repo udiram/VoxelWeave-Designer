@@ -18,6 +18,9 @@ RUN pnpm --dir services/release-api build
 
 FROM node:22-alpine
 
+LABEL org.opencontainers.image.source="https://github.com/udiram/VoxelWeave-Designer"
+LABEL org.opencontainers.image.description="VoxelWeave Designer public site and release API"
+
 WORKDIR /app
 ENV NODE_ENV=production
 ENV SITE_DIST_DIR=/app/apps/site/dist
