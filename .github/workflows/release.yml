@@ -156,7 +156,7 @@ jobs:
           fi
           {
             printf '%s\n\n' "$summary"
-            printf 'Source revision: `%s`\n\n' "$GITHUB_SHA"
+            printf "Source revision: \`%s\`\n\n" "$GITHUB_SHA"
             printf '%s\n' \
               'Validation evidence:' \
               '- [x] Unit + integration — passed for this exact source revision in GitHub CI' \
