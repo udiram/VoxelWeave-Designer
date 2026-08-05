@@ -9,7 +9,8 @@ export type IconName =
   | "fit" | "lock" | "download" | "upload" | "file" | "scan" | "ruler"
   | "move" | "rotate" | "scale" | "union" | "subtract" | "intersect"
   | "refresh" | "search" | "checkCircle" | "arrowUpRight" | "external"
-  | "grid" | "probe" | "target" | "menu" | "sliders" | "contrast" | "help";
+  | "grid" | "probe" | "target" | "menu" | "sliders" | "contrast" | "help"
+  | "trash" | "copy" | "group" | "ungroup" | "align" | "unlock" | "rename";
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -66,6 +67,13 @@ export function Icon({ name, size = 18, ...props }: IconProps) {
     case "zoomOut": return <svg {...common}><circle cx="10.8" cy="10.8" r="6.4"/><path d="m16 16 4 4M7.8 10.8h6"/></svg>;
     case "fit": return <svg {...common}><path d="M5 9V5h4M15 5h4v4M19 15v4h-4M9 19H5v-4"/><path d="M8 8h8v8H8z"/></svg>;
     case "lock": return <svg {...common}><rect x="5" y="10" width="14" height="10" rx="1.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>;
+    case "unlock": return <svg {...common}><rect x="5" y="10" width="14" height="10" rx="1.5"/><path d="M16 10V7a4 4 0 0 0-7.4-2.1"/></svg>;
+    case "trash": return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
+    case "copy": return <svg {...common}><rect x="8" y="8" width="11" height="11" rx="1.5"/><path d="M16 8V5H5v11h3"/></svg>;
+    case "group": return <svg {...common}><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/><path d="M14 4h6v6M4 14v6h6"/></svg>;
+    case "ungroup": return <svg {...common}><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/><path d="M14 4h6v6M4 14v6h6" strokeDasharray="2 2"/></svg>;
+    case "align": return <svg {...common}><path d="M4 4v16M8 7h10M8 12h7M8 17h12"/></svg>;
+    case "rename": return <svg {...common}><path d="M4 18h4l11-11-4-4L4 14v4Z"/><path d="m13 5 4 4M10 18h10"/></svg>;
     case "download": return <svg {...common}><path d="M12 4v11M8 11l4 4 4-4M5 19h14"/></svg>;
     case "upload": return <svg {...common}><path d="M12 15V4M8 8l4-4 4 4M5 19h14"/></svg>;
     case "file": return <svg {...common}><path d="M6 3h8l4 4v14H6V3Z"/><path d="M14 3v5h4M9 12h6M9 16h6"/></svg>;

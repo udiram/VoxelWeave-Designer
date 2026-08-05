@@ -7,6 +7,8 @@ export type OutputMode = "continuous" | "tiles";
 export type ComparisonMode = "overlay" | "difference" | "profile";
 export type ToolId = "T0" | "T1";
 export type SceneTransformMode = "translate" | "rotate" | "scale";
+export type SceneAlignmentAxis = "x" | "y" | "z";
+export type SceneAlignmentMode = "min" | "center" | "max";
 
 export interface Vec3 {
   x: number;
@@ -44,6 +46,10 @@ export interface SceneObject {
   sourceCenterMm?: Vec3;
   boolean?: { operation: "union" | "subtract" | "intersect"; operands: string[] };
   sourcePath?: string;
+  /** User-level editing metadata. DICOM geometry is implicitly locked. */
+  locked?: boolean;
+  /** Non-Boolean visual grouping identifier. Group membership never changes canonical geometry. */
+  groupId?: string;
   visible: boolean;
 }
 
@@ -216,6 +222,10 @@ export interface ProjectDocument {
 export interface ProjectUiState {
   workspace: WorkspaceId;
   selectedSceneId: string;
+  /** All selected scene ids; selectedSceneId remains the transform/inspector primary. */
+  selectedSceneIds: string[];
+  /** Session-local monotonic counters for generated scene identities. */
+  sceneIdentityCounters?: Record<string, number>;
   selectedPane: Orientation | "3d";
   toast: string;
   autosaveState: "saved" | "saving" | "recovered";
@@ -252,12 +262,22 @@ export type ProjectAction =
   | { type: "SET_REGISTRATION"; method: VerifyState["registrationMethod"]; confidence: VerifyState["confidence"] }
   | { type: "EXPORT_REPORT"; reportPath?: string }
   | { type: "SET_SCENE_SELECTION"; id: string }
+  | { type: "SET_SCENE_SELECTIONS"; ids: string[]; primaryId?: string }
   | { type: "SET_SCENE_TRANSFORM"; id: string; transform: Partial<SceneObject["transform"]> }
+  | { type: "SET_SCENE_TRANSFORMS"; transforms: Array<{ id: string; transform: Partial<SceneObject["transform"]> }> }
   | { type: "SET_SCENE_DIMENSIONS"; id: string; dimensionsMm: Vec3 }
   | { type: "SET_SCENE_OWNERSHIP"; id: string; region?: SceneObject["region"]; tool?: ToolId }
   | { type: "SET_SCENE_TARGET_HU"; id: string; targetHu: number }
   | { type: "TOGGLE_SCENE_VISIBILITY"; id: string }
-  | { type: "RESTORE_SCENE_SNAPSHOT"; scene: SceneObject[]; selectedSceneId: string; message: string }
+  | { type: "DELETE_SCENE_OBJECTS"; ids: string[] }
+  | { type: "DUPLICATE_SCENE_OBJECTS"; ids: string[]; offset?: Vec3 }
+  | { type: "INSERT_SCENE_OBJECTS"; objects: SceneObject[]; offset?: Vec3 }
+  | { type: "GROUP_SCENE_OBJECTS"; ids: string[] }
+  | { type: "UNGROUP_SCENE_OBJECTS"; ids?: string[]; groupId?: string }
+  | { type: "SET_SCENE_LOCKED"; ids: string[]; locked: boolean }
+  | { type: "RENAME_SCENE_OBJECT"; id: string; name: string }
+  | { type: "ALIGN_SCENE_OBJECTS"; ids: string[]; axis: SceneAlignmentAxis; mode: SceneAlignmentMode; anchorId?: string }
+  | { type: "RESTORE_SCENE_SNAPSHOT"; scene: SceneObject[]; selectedSceneId: string; selectedSceneIds?: string[]; message: string }
   | { type: "ADD_PRIMITIVE"; kind: SceneObject["kind"] }
   | { type: "BOOLEAN_SCENE"; operation: "union" | "subtract" | "intersect"; operandIds: string[] }
   | { type: "IMPORT_SOLID"; path: string; format: "stl" | "3mf" }
